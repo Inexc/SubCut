@@ -13,6 +13,7 @@ pub struct SilenceGap {
     pub is_cut: bool,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VideoInfo {
     pub duration: f64,
