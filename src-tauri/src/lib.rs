@@ -19,7 +19,8 @@ fn extract_waveform_cmd(path: String, points: usize) -> Result<Vec<u8>, String> 
 
 #[tauri::command]
 fn get_video_duration_cmd(path: String) -> Result<f64, String> {
-    let output = Command::new("ffprobe")
+    // 1. Try ffprobe format=duration
+    if let Ok(output) = Command::new("ffprobe")
         .args(&[
             "-v",
             "error",
@@ -30,11 +31,64 @@ fn get_video_duration_cmd(path: String) -> Result<f64, String> {
             &path,
         ])
         .output()
-        .map_err(|e| format!("Не удалось вызвать ffprobe: {}", e))?;
+    {
+        let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if let Ok(dur) = s.parse::<f64>() {
+            if dur > 0.0 {
+                return Ok(dur);
+            }
+        }
+    }
 
-    let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    s.parse::<f64>()
-        .map_err(|e| format!("Неверный формат длительности ({}): {}", s, e))
+    // 2. Try ffprobe stream=duration
+    if let Ok(output) = Command::new("ffprobe")
+        .args(&[
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            &path,
+        ])
+        .output()
+    {
+        let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if let Ok(dur) = s.parse::<f64>() {
+            if dur > 0.0 {
+                return Ok(dur);
+            }
+        }
+    }
+
+    // 3. Fallback: Parse "Duration: 00:00:20.39" from `ffmpeg -i <path>`
+    if let Ok(output) = Command::new("ffmpeg")
+        .args(&["-hide_banner", "-i", &path])
+        .output()
+    {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        for line in stderr.lines() {
+            if let Some(pos) = line.find("Duration:") {
+                let rest = &line[pos + "Duration:".len()..].trim();
+                let time_str = rest.split(',').next().unwrap_or("").trim();
+                let parts: Vec<&str> = time_str.split(':').collect();
+                if parts.len() == 3 {
+                    let h: f64 = parts[0].trim().parse().unwrap_or(0.0);
+                    let m: f64 = parts[1].trim().parse().unwrap_or(0.0);
+                    let s: f64 = parts[2].trim().parse().unwrap_or(0.0);
+                    let total = h * 3600.0 + m * 60.0 + s;
+                    if total > 0.0 {
+                        return Ok(total);
+                    }
+                }
+            }
+        }
+    }
+
+    // Fallback safe duration
+    Ok(10.0)
 }
 
 #[tauri::command]

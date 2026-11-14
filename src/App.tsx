@@ -486,6 +486,12 @@ export default function App() {
                   src={videoSrc}
                   className="w-full h-full object-cover"
                   playsInline
+                  onLoadedMetadata={(e) => {
+                    const d = e.currentTarget.duration
+                    if (d && !isNaN(d) && d > 0) {
+                      setTotalDuration(d)
+                    }
+                  }}
                   onTimeUpdate={handleTimeUpdate}
                   onPlay={() => setIsPlaying(true)}
                   onPause={() => setIsPlaying(false)}
