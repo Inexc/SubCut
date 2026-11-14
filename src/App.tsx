@@ -1,5 +1,5 @@
-import { useState } from 'react'
-import { invoke } from '@tauri-apps/api/core'
+import { useState, useRef, useEffect } from 'react'
+import { invoke, convertFileSrc } from '@tauri-apps/api/core'
 import {
   Scissors,
   Eye,
@@ -10,26 +10,16 @@ import {
   SkipBack,
   SkipForward,
   FolderOpen,
-  Volume2,
-  Sliders,
-  ZoomIn,
-  ZoomOut,
-  Clock,
-  Sparkles,
   RotateCcw,
-  Maximize2,
-  Layers,
-  Captions,
+  Search,
 } from 'lucide-react'
 
-// Data models
 interface Phrase {
   id: string
   speaker: string
   startTime: number
   endTime: number
   text: string
-  highlightWord?: string
 }
 
 interface SilenceGap {
@@ -40,20 +30,19 @@ interface SilenceGap {
   isCut: boolean
 }
 
-type TimelineItem =
+type ScriptItem =
   | { type: 'phrase'; data: Phrase }
   | { type: 'silence'; data: SilenceGap }
 
-const INITIAL_TRANSCRIPT: TimelineItem[] = [
+const INITIAL_SCRIPT: ScriptItem[] = [
   {
     type: 'phrase',
     data: {
       id: 'p-1',
-      speaker: 'Спикер 1',
+      speaker: 'Спикер',
       startTime: 0.0,
       endTime: 3.45,
       text: 'Всем привет! Сегодня разберём, как быстро монтировать рилсы прямо по тексту.',
-      highlightWord: 'быстро монтировать',
     },
   },
   {
@@ -70,11 +59,10 @@ const INITIAL_TRANSCRIPT: TimelineItem[] = [
     type: 'phrase',
     data: {
       id: 'p-2',
-      speaker: 'Спикер 1',
+      speaker: 'Спикер',
       startTime: 4.85,
       endTime: 8.6,
       text: 'Обычно монтаж отнимает часы на поиск пауз и ручную нарезку дорожки.',
-      highlightWord: 'отнимает часы',
     },
   },
   {
@@ -91,11 +79,10 @@ const INITIAL_TRANSCRIPT: TimelineItem[] = [
     type: 'phrase',
     data: {
       id: 'p-3',
-      speaker: 'Спикер 1',
+      speaker: 'Спикер',
       startTime: 10.1,
       endTime: 14.3,
       text: 'SubCut автоматически находит всю тишину и вырезает её в один клик.',
-      highlightWord: 'в один клик',
     },
   },
   {
@@ -112,52 +99,59 @@ const INITIAL_TRANSCRIPT: TimelineItem[] = [
     type: 'phrase',
     data: {
       id: 'p-4',
-      speaker: 'Спикер 1',
+      speaker: 'Спикер',
       startTime: 16.0,
       endTime: 20.4,
       text: 'А динамические субтитры уже сгенерированы и готовы к публикации.',
-      highlightWord: 'динамические субтитры',
     },
   },
 ]
 
-// Audio waveform synthetic peaks data
-const WAVEFORM_POINTS = [
-  35, 45, 70, 85, 95, 80, 60, 45, 65, 80, 75, 55, 30, // phrase 1
-  8, 5, 6, 8, 5,                                      // silence 1
-  50, 65, 90, 85, 70, 60, 80, 95, 90, 70, 50, 40,      // phrase 2
-  6, 5, 6, 7, 5,                                      // silence 2
-  40, 75, 90, 100, 85, 75, 90, 80, 60, 45,            // phrase 3
-  7, 5, 8, 6, 5,                                      // silence 3
-  55, 70, 85, 90, 75, 80, 95, 70, 60, 40, 20,         // phrase 4
-]
+// 120 dense default waveform points
+const DEFAULT_WAVEFORM = Array.from({ length: 120 }, (_, i) => {
+  const isPause = (i >= 20 && i <= 28) || (i >= 50 && i <= 60) || (i >= 85 && i <= 95)
+  if (isPause) return 6 + (i % 3) * 2
+  return 20 + Math.sin(i * 0.4) * 35 + Math.cos(i * 0.9) * 25
+})
 
 function formatTime(seconds: number): string {
   const mins = Math.floor(seconds / 60)
   const secs = Math.floor(seconds % 60)
-  const ms = Math.floor((seconds % 1) * 100)
-  return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}.${String(ms).padStart(2, '0')}`
+  const ms = Math.floor((seconds % 1) * 10)
+  return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}.${ms}`
 }
 
 export default function App() {
-  const [items, setItems] = useState<TimelineItem[]>(INITIAL_TRANSCRIPT)
-  const [isPlaying, setIsPlaying] = useState(false)
-  const [currentTime, setCurrentTime] = useState(2.15)
-  const [showPauses, setShowPauses] = useState(true)
-  const [searchQuery, setSearchQuery] = useState('')
-  const [zoomLevel, setZoomLevel] = useState(100)
-  const [filePath, setFilePath] = useState('reels_creator_master_01.mp4')
-  const [totalVideoDuration, setTotalVideoDuration] = useState(20.4)
-  const [waveformPoints, setWaveformPoints] = useState<number[]>(WAVEFORM_POINTS)
-  const [isAnalyzing, setIsAnalyzing] = useState(false)
-  const [isExporting, setIsExporting] = useState(false)
+  const [items, setItems] = useState<ScriptItem[]>(INITIAL_SCRIPT)
+  const [filePath, setFilePath] = useState<string | null>(null)
+  const [videoSrc, setVideoSrc] = useState<string | null>(null)
+  const [totalDuration, setTotalDuration] = useState<number>(20.4)
+  const [currentTime, setCurrentTime] = useState<number>(0)
+  const [isPlaying, setIsPlaying] = useState<boolean>(false)
+  const [showPauses, setShowPauses] = useState<boolean>(true)
+  const [waveform, setWaveform] = useState<number[]>(DEFAULT_WAVEFORM)
+  const [isAnalyzing, setIsAnalyzing] = useState<boolean>(false)
+  const [isExporting, setIsExporting] = useState<boolean>(false)
+  const [searchQuery, setSearchQuery] = useState<string>('')
 
-  // Silence calculations
+  const videoRef = useRef<HTMLVideoElement>(null)
+  const timelineRef = useRef<HTMLDivElement>(null)
+
+  // Derived stats
   const silences = items.filter((i): i is { type: 'silence'; data: SilenceGap } => i.type === 'silence')
-  const activeSilences = silences.filter((s) => !s.data.isCut)
-  const totalSilenceDuration = activeSilences.reduce((acc, s) => acc + s.data.duration, 0)
+  const activeCuts = silences.filter((s) => s.data.isCut)
+  const cutDuration = activeCuts.reduce((acc, s) => acc + s.data.duration, 0)
+  const remainingDuration = Math.max(0, totalDuration - cutDuration)
 
-  // Actions
+  // Find active phrase for subtitle overlay
+  const activePhrase = items.find(
+    (item): item is { type: 'phrase'; data: Phrase } =>
+      item.type === 'phrase' &&
+      currentTime >= item.data.startTime &&
+      currentTime <= item.data.endTime
+  )
+
+  // Open Video File
   const handleOpenFile = async () => {
     try {
       const selected = await invoke<string | null>('select_video_file_cmd')
@@ -165,36 +159,43 @@ export default function App() {
 
       setIsAnalyzing(true)
       setFilePath(selected)
+      setVideoSrc(convertFileSrc(selected))
 
+      // 1. Get real duration
       const dur = await invoke<number>('get_video_duration_cmd', { path: selected })
-      setTotalVideoDuration(dur)
+      if (dur && dur > 0) {
+        setTotalDuration(dur)
+      }
 
-      const detected = await invoke<SilenceGap[]>('detect_silence_cmd', {
+      // 2. Detect pauses via FFmpeg
+      const detectedGaps = await invoke<SilenceGap[]>('detect_silence_cmd', {
         path: selected,
         thresholdDb: -30.0,
         minDuration: 0.5,
       })
 
+      // 3. Extract real waveform peaks
       const peaks = await invoke<number[]>('extract_waveform_cmd', {
         path: selected,
-        points: 120,
+        points: 140,
       })
       if (peaks && peaks.length > 0) {
-        setWaveformPoints(peaks)
+        setWaveform(peaks)
       }
 
-      const newItems: TimelineItem[] = []
+      // 4. Construct script items between silences
+      const newItems: ScriptItem[] = []
       let cur = 0
-      detected.forEach((gap, idx) => {
+      detectedGaps.forEach((gap, idx) => {
         if (gap.startTime > cur + 0.1) {
           newItems.push({
             type: 'phrase',
             data: {
               id: `p-${idx + 1}`,
-              speaker: 'Спикер 1',
+              speaker: 'Спикер',
               startTime: cur,
               endTime: gap.startTime,
-              text: `[Фрагмент речи ${idx + 1}]`,
+              text: `Фрагмент ${idx + 1} речи спикера. Кликните для редактирования субтитров.`,
             },
           })
         }
@@ -209,11 +210,11 @@ export default function App() {
         newItems.push({
           type: 'phrase',
           data: {
-            id: `p-${detected.length + 1}`,
-            speaker: 'Спикер 1',
+            id: `p-${detectedGaps.length + 1}`,
+            speaker: 'Спикер',
             startTime: cur,
             endTime: dur,
-            text: `[Фрагмент речи ${detected.length + 1}]`,
+            text: `Фрагмент ${detectedGaps.length + 1} речи спикера.`,
           },
         })
       }
@@ -221,61 +222,54 @@ export default function App() {
       if (newItems.length > 0) {
         setItems(newItems)
       }
-      setCurrentTime(0)
+      seekTo(0)
     } catch (err) {
-      alert(`Ошибка анализа видео через FFmpeg: ${err}`)
+      alert(`Ошибка анализа видео: ${err}`)
     } finally {
       setIsAnalyzing(false)
     }
   }
 
-  const handleExportVideo = async () => {
-    try {
-      const cuts = items
-        .filter((i): i is { type: 'silence'; data: SilenceGap } => i.type === 'silence' && i.data.isCut)
-        .map((s) => [s.data.startTime, s.data.endTime])
-
-      const defaultName = filePath ? `trimmed_${filePath.split(/[\\/]/).pop()}` : 'subcut_output.mp4'
-      const outputPath = await invoke<string | null>('select_output_file_cmd', { defaultName })
-      if (!outputPath) return
-
-      setIsExporting(true)
-      await invoke('export_trimmed_video_cmd', {
-        inputPath: filePath,
-        cuts,
-        outputPath,
-        totalDuration: totalVideoDuration,
-      })
-      alert(`Видео успешно смонтировано и сохранено в:\n${outputPath}`)
-    } catch (err) {
-      alert(`Ошибка экспорта: ${err}`)
-    } finally {
-      setIsExporting(false)
+  // Play / Pause toggle
+  const togglePlay = () => {
+    if (!videoRef.current) return
+    if (isPlaying) {
+      videoRef.current.pause()
+      setIsPlaying(false)
+    } else {
+      videoRef.current.play().catch(console.error)
+      setIsPlaying(true)
     }
   }
 
-  const handleUpdatePhraseText = (id: string, newText: string) => {
-    setItems((prev) =>
-      prev.map((item) => {
-        if (item.type === 'phrase' && item.data.id === id) {
-          return {
-            ...item,
-            data: { ...item.data, text: newText },
-          }
-        }
-        return item
-      })
+  // Seek video
+  const seekTo = (time: number) => {
+    const clamped = Math.max(0, Math.min(totalDuration, time))
+    setCurrentTime(clamped)
+    if (videoRef.current) {
+      videoRef.current.currentTime = clamped
+    }
+  }
+
+  // Real-time Auto-Skip Cut Silences during playback
+  const handleTimeUpdate = () => {
+    if (!videoRef.current) return
+    const t = videoRef.current.currentTime
+    setCurrentTime(t)
+
+    // Check if current time falls inside a cut silence
+    const currentCut = items.find(
+      (item): item is { type: 'silence'; data: SilenceGap } =>
+        item.type === 'silence' && item.data.isCut && t >= item.data.startTime && t < item.data.endTime
     )
+
+    if (currentCut) {
+      videoRef.current.currentTime = currentCut.data.endTime
+    }
   }
 
-  // Actions
-  const togglePlay = () => setIsPlaying(!isPlaying)
-
-  const handleSeek = (time: number) => {
-    setCurrentTime(Math.max(0, Math.min(totalVideoDuration, time)))
-  }
-
-  const handleCutSingleSilence = (id: string) => {
+  // Toggle single silence cut
+  const toggleSilenceCut = (id: string) => {
     setItems((prev) =>
       prev.map((item) => {
         if (item.type === 'silence' && item.data.id === id) {
@@ -289,633 +283,464 @@ export default function App() {
     )
   }
 
-  const handleCutAllSilences = () => {
+  // Cut all silences
+  const handleCutAll = () => {
     setItems((prev) =>
       prev.map((item) => {
         if (item.type === 'silence') {
-          return {
-            ...item,
-            data: { ...item.data, isCut: true },
-          }
+          return { ...item, data: { ...item.data, isCut: true } }
         }
         return item
       })
     )
   }
 
-  const handleRestoreAllSilences = () => {
+  // Restore all silences
+  const handleRestoreAll = () => {
     setItems((prev) =>
       prev.map((item) => {
         if (item.type === 'silence') {
-          return {
-            ...item,
-            data: { ...item.data, isCut: false },
-          }
+          return { ...item, data: { ...item.data, isCut: false } }
         }
         return item
       })
     )
   }
 
-  const handleJumpToNextPhrase = () => {
-    const nextPhrase = items.find(
-      (item): item is { type: 'phrase'; data: Phrase } =>
-        item.type === 'phrase' && item.data.startTime > currentTime
+  // Update text
+  const handleTextChange = (id: string, newText: string) => {
+    setItems((prev) =>
+      prev.map((item) => {
+        if (item.type === 'phrase' && item.data.id === id) {
+          return { ...item, data: { ...item.data, text: newText } }
+        }
+        return item
+      })
     )
-    if (nextPhrase) {
-      setCurrentTime(nextPhrase.data.startTime)
-    } else {
-      setCurrentTime(0)
+  }
+
+  // Export trimmed video
+  const handleExport = async () => {
+    try {
+      if (!filePath) {
+        alert('Сначала откройте видеофайл')
+        return
+      }
+
+      const cuts = items
+        .filter((i): i is { type: 'silence'; data: SilenceGap } => i.type === 'silence' && i.data.isCut)
+        .map((s) => [s.data.startTime, s.data.endTime])
+
+      const defaultName = `subcut_${filePath.split(/[\\/]/).pop()}`
+      const outputPath = await invoke<string | null>('select_output_file_cmd', { defaultName })
+      if (!outputPath) return
+
+      setIsExporting(true)
+      await invoke('export_trimmed_video_cmd', {
+        inputPath: filePath,
+        cuts,
+        outputPath,
+        totalDuration,
+      })
+      alert(`Видео успешно смонтировано:\n${outputPath}`)
+    } catch (err) {
+      alert(`Ошибка экспорта: ${err}`)
+    } finally {
+      setIsExporting(false)
     }
   }
 
-  // Find active subtitle for current time
-  const currentPhrase = items.find(
-    (item): item is { type: 'phrase'; data: Phrase } =>
-      item.type === 'phrase' &&
-      currentTime >= item.data.startTime &&
-      currentTime <= item.data.endTime
-  )
+  // Timeline click scrub
+  const handleTimelineClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (!timelineRef.current) return
+    const rect = timelineRef.current.getBoundingClientRect()
+    const clickX = e.clientX - rect.left
+    const pct = Math.max(0, Math.min(1, clickX / rect.width))
+    seekTo(pct * totalDuration)
+  }
 
-  const activeSubtitle = currentPhrase ? currentPhrase.data.text : '...'
+  // Keyboard shortcuts
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) {
+        return
+      }
+      if (e.code === 'Space') {
+        e.preventDefault()
+        togglePlay()
+      } else if (e.code === 'ArrowLeft') {
+        e.preventDefault()
+        seekTo(currentTime - 2)
+      } else if (e.code === 'ArrowRight') {
+        e.preventDefault()
+        seekTo(currentTime + 2)
+      }
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [isPlaying, currentTime, totalDuration])
+
+  const fileName = filePath ? filePath.split(/[\\/]/).pop() : 'Нажмите чтобы выбрать видео'
 
   return (
-    <div className="flex flex-col h-screen w-screen bg-app text-text-main font-sans select-none overflow-hidden">
-      {/* =========================================================================
-          1. HEADER (h-12 / 48px)
-          Strictly h-8 controls, no unicode emojis, TypeUI nested radius formula.
-         ========================================================================= */}
-      <header className="h-12 border-b border-subtle-border bg-card px-4 flex items-center justify-between z-20 flex-shrink-0">
-        {/* Left: Branding & Active File Info */}
+    <div className="flex flex-col h-screen w-screen bg-zinc-950 text-zinc-100 font-sans select-none overflow-hidden">
+      
+      {/* 1. TOP APP BAR: Minimal, Quiet, No Clutter (44px) */}
+      <header className="h-11 px-4 border-b border-zinc-800/80 bg-zinc-900/60 flex items-center justify-between flex-shrink-0 z-20">
+        
+        {/* Left: Branding & Open File */}
         <div className="flex items-center gap-3">
           <div className="flex items-center gap-2">
-            <div className="w-7 h-7 rounded-inner-btn bg-zinc-800 border border-subtle-border flex items-center justify-center text-zinc-100 shadow-sm">
-              <Scissors className="w-4 h-4 text-zinc-200" />
+            <div className="w-6 h-6 rounded bg-zinc-800 border border-zinc-700 flex items-center justify-center text-zinc-300">
+              <Scissors className="w-3.5 h-3.5" />
             </div>
-            <span className="font-bold text-sm tracking-tight text-text-main">
-              SubCut
-            </span>
-            <span className="text-2xs font-mono font-medium px-1.5 py-0.5 rounded-inner-btn bg-zinc-800 text-zinc-400 border border-subtle-border">
-              v0.1
-            </span>
+            <span className="text-xs font-semibold tracking-tight text-zinc-200">SubCut</span>
           </div>
 
-          <div className="h-4 w-px bg-subtle-border mx-1" />
+          <div className="h-3.5 w-px bg-zinc-800" />
 
-          {/* Breadcrumb / Path */}
-          <div
+          {/* Clickable File Selector */}
+          <button
             onClick={handleOpenFile}
-            className="flex items-center gap-1.5 text-xs text-text-muted bg-app hover:bg-card-hover cursor-pointer px-2.5 h-8 rounded-inner-btn border border-subtle-border max-w-sm transition-colors"
-            title="Нажмите, чтобы открыть видеофайл через Проводник"
+            disabled={isAnalyzing}
+            className="flex items-center gap-2 h-7 px-2.5 rounded bg-zinc-800/60 hover:bg-zinc-800 border border-zinc-700/60 text-xs text-zinc-300 hover:text-white transition max-w-sm truncate"
+            title="Выбрать другое видео"
           >
-            <FolderOpen className="w-3.5 h-3.5 text-text-dim flex-shrink-0" />
+            <FolderOpen className="w-3.5 h-3.5 text-zinc-400 flex-shrink-0" />
             <span className="font-mono truncate">
-              {isAnalyzing ? 'Анализ FFmpeg...' : filePath.split(/[\\/]/).pop()}
+              {isAnalyzing ? 'Анализ через FFmpeg...' : fileName}
             </span>
-          </div>
+          </button>
 
-          {/* Format Badge */}
-          <div className="h-8 px-2.5 rounded-inner-btn bg-zinc-800/80 border border-subtle-border flex items-center gap-1.5 text-2xs font-mono font-medium text-zinc-300">
-            <span className="inline-block w-1.5 h-1.5 rounded-full bg-emerald-500" />
-            1080×1920 60fps
+          {/* Quick Metrics */}
+          <div className="hidden sm:flex items-center gap-2 text-xs font-mono text-zinc-500">
+            <span>{formatTime(totalDuration)}</span>
+            <span>•</span>
+            <span className="text-zinc-400">Пауз: {silences.length}</span>
+            {cutDuration > 0 && (
+              <>
+                <span>•</span>
+                <span className="text-emerald-400 font-medium">-{cutDuration.toFixed(1)}с</span>
+              </>
+            )}
           </div>
         </div>
 
-        {/* Right: Actions Row (Strictly unified h-8 height) */}
+        {/* Right: Actions */}
         <div className="flex items-center gap-2">
-          {/* Pause visibility toggle */}
+          {/* Pause Toggle */}
           <button
-            type="button"
             onClick={() => setShowPauses(!showPauses)}
-            className={`h-8 px-3 rounded-inner-btn text-xs border flex items-center gap-1.5 transition-colors ${
-              showPauses
-                ? 'border-subtle-border bg-card-hover text-text-main hover:border-zinc-600'
-                : 'border-subtle-border bg-app text-text-muted hover:text-text-main'
-            }`}
-            title="Переключить отображение пауз в списке и на таймлайне"
+            className="h-7 px-2.5 rounded text-xs font-medium bg-zinc-800/50 hover:bg-zinc-800 border border-zinc-700/60 text-zinc-300 flex items-center gap-1.5 transition"
+            title="Показать/скрыть паузы"
           >
-            {showPauses ? (
-              <Eye className="w-3.5 h-3.5 text-zinc-300" />
-            ) : (
-              <EyeOff className="w-3.5 h-3.5 text-text-dim" />
-            )}
-            <span>Паузы: {activeSilences.length}</span>
+            {showPauses ? <Eye className="w-3.5 h-3.5 text-zinc-400" /> : <EyeOff className="w-3.5 h-3.5 text-zinc-500" />}
+            <span className="hidden md:inline">Паузы</span>
           </button>
 
-          {/* Batch silence cutter */}
-          {activeSilences.length > 0 ? (
+          {/* Batch Cut/Restore Action */}
+          {activeCuts.length === silences.length && silences.length > 0 ? (
             <button
-              type="button"
-              onClick={handleCutAllSilences}
-              className="h-8 px-3 rounded-inner-btn text-xs font-medium border border-red-500/50 bg-red-950/25 hover:bg-red-950/50 text-red-300 flex items-center gap-1.5 transition-all shadow-sm active:scale-[0.98]"
-              title="Вырезать все обнаруженные паузы"
+              onClick={handleRestoreAll}
+              className="h-7 px-2.5 rounded text-xs font-medium bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-zinc-300 flex items-center gap-1.5 transition"
             >
-              <Scissors className="w-3.5 h-3.5 text-red-400" />
-              <span>
-                Вырезать все паузы (-{totalSilenceDuration.toFixed(1)} с)
-              </span>
+              <RotateCcw className="w-3 h-3 text-zinc-400" />
+              <span>Восстановить паузы</span>
             </button>
           ) : (
             <button
-              type="button"
-              onClick={handleRestoreAllSilences}
-              className="h-8 px-3 rounded-inner-btn text-xs font-medium border border-subtle-border bg-zinc-800 hover:bg-zinc-700 text-zinc-300 flex items-center gap-1.5 transition-colors"
-              title="Восстановить вырезанные паузы"
+              onClick={handleCutAll}
+              className="h-7 px-2.5 rounded text-xs font-medium bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-red-300 hover:text-red-200 flex items-center gap-1.5 transition"
             >
-              <RotateCcw className="w-3.5 h-3.5 text-zinc-400" />
-              <span>Восстановить паузы</span>
+              <Scissors className="w-3 h-3 text-red-400" />
+              <span>Вырезать все паузы</span>
             </button>
           )}
 
-          {/* Primary export button */}
+          {/* Primary Export */}
           <button
-            type="button"
-            onClick={handleExportVideo}
-            disabled={isAnalyzing || isExporting}
-            className="h-8 px-3.5 rounded-inner-btn text-xs font-semibold bg-zinc-100 hover:bg-white text-zinc-950 flex items-center gap-1.5 transition-colors shadow-sm active:scale-[0.98] disabled:opacity-50"
+            onClick={handleExport}
+            disabled={isExporting || isAnalyzing}
+            className="h-7 px-3 rounded text-xs font-semibold bg-zinc-100 hover:bg-white text-zinc-950 flex items-center gap-1.5 transition shadow-sm disabled:opacity-50"
           >
-            <Download className="w-3.5 h-3.5 text-zinc-950" />
-            <span>{isExporting ? 'Экспорт...' : 'Экспорт MP4'}</span>
+            <Download className="w-3.5 h-3.5" />
+            <span>{isExporting ? 'Экспорт...' : 'Экспорт'}</span>
           </button>
         </div>
       </header>
 
-      {/* =========================================================================
-          2. MAIN SPLIT (Center Area: 60% Preview / 40% Transcript)
-         ========================================================================= */}
+      {/* 2. MAIN SPLIT: Proportional Video Left / Clean Script Right */}
       <div className="flex-1 flex overflow-hidden">
-        {/* LEFT PANE (60%): Preview Monitor with 9:16 vertical reels */}
-        <section className="w-[60%] flex flex-col border-r border-subtle-border bg-app">
-          {/* Top preview toolbar */}
-          <div className="h-8 px-3 border-b border-subtle-border bg-card/60 flex items-center justify-between text-2xs text-text-muted">
-            <div className="flex items-center gap-2">
-              <span className="font-mono text-zinc-400">9:16 Вертикальный холст</span>
-              <span className="text-zinc-600">·</span>
-              <span className="text-zinc-400">Масштаб: По размеру окна</span>
-            </div>
-            <div className="flex items-center gap-1.5">
-              <span className="px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-400 font-mono">
-                Safe Zones: ON
-              </span>
-              <button
-                type="button"
-                className="w-6 h-6 rounded flex items-center justify-center hover:bg-zinc-800 text-zinc-400 hover:text-zinc-200 transition-colors"
-                title="Во весь экран"
-              >
-                <Maximize2 className="w-3.5 h-3.5" />
-              </button>
-            </div>
-          </div>
-
-          {/* Video canvas container */}
-          <div className="flex-1 relative flex items-center justify-center p-4 bg-app overflow-hidden">
-            {/* 9:16 Vertical Phone/Reels Frame */}
-            <div className="relative aspect-[9/16] h-full max-h-[580px] bg-black rounded-outer-box border border-subtle-border shadow-2xl overflow-hidden flex flex-col justify-between">
-              {/* Background simulated video frame */}
-              <div className="absolute inset-0 bg-gradient-to-b from-zinc-900 via-zinc-950 to-black flex items-center justify-center">
-                {/* Visual grid / camera overlay simulation */}
-                <div className="absolute inset-4 border border-dashed border-white/10 rounded pointer-events-none" />
-                
-                {/* Speaker avatar silhouette & waveform visualizer */}
-                <div className="flex flex-col items-center gap-3 z-0 opacity-80">
-                  <div className="w-20 h-20 rounded-full bg-zinc-800/80 border border-zinc-700/60 flex items-center justify-center shadow-inner">
-                    <Sparkles className="w-8 h-8 text-zinc-500" />
+        
+        {/* LEFT PANE: Video Player Surface */}
+        <section className="w-[50%] lg:w-[48%] border-r border-zinc-800/80 bg-zinc-950 flex flex-col justify-between p-4">
+          
+          {/* Framed Video Container (9:16 or native aspect ratio, nicely centered) */}
+          <div className="relative flex-1 flex items-center justify-center min-h-0">
+            <div className="relative aspect-[9/16] h-full max-h-[520px] bg-black rounded-lg border border-zinc-800/80 overflow-hidden shadow-2xl flex flex-col justify-between select-none">
+              
+              {/* Real Video Element or Fallback */}
+              {videoSrc ? (
+                <video
+                  ref={videoRef}
+                  src={videoSrc}
+                  className="w-full h-full object-cover"
+                  playsInline
+                  onTimeUpdate={handleTimeUpdate}
+                  onPlay={() => setIsPlaying(true)}
+                  onPause={() => setIsPlaying(false)}
+                />
+              ) : (
+                <div
+                  onClick={handleOpenFile}
+                  className="absolute inset-0 flex flex-col items-center justify-center p-6 text-center cursor-pointer hover:bg-zinc-900/40 transition group"
+                >
+                  <div className="w-12 h-12 rounded-full bg-zinc-900 border border-zinc-800 group-hover:border-zinc-700 flex items-center justify-center text-zinc-400 mb-3 transition">
+                    <FolderOpen className="w-5 h-5" />
                   </div>
-                  <div className="flex items-end gap-1 h-6">
-                    <span className="w-1 bg-zinc-600 rounded-full animate-pulse h-3" />
-                    <span className="w-1 bg-zinc-400 rounded-full animate-pulse h-6" />
-                    <span className="w-1 bg-zinc-300 rounded-full animate-pulse h-4" />
-                    <span className="w-1 bg-zinc-500 rounded-full animate-pulse h-5" />
-                    <span className="w-1 bg-zinc-600 rounded-full animate-pulse h-2" />
-                  </div>
+                  <span className="text-xs font-medium text-zinc-300">Нажмите чтобы загрузить видео</span>
+                  <span className="text-[11px] font-mono text-zinc-500 mt-1">MP4, MOV, MKV</span>
                 </div>
-              </div>
+              )}
 
-              {/* Safe zone overlay (Reels UI mock margins) */}
-              <div className="relative z-10 p-3 flex justify-between items-start pointer-events-none">
-                <span className="text-2xs font-mono font-medium px-1.5 py-0.5 rounded bg-black/60 text-zinc-300 backdrop-blur-sm border border-white/10">
-                  REC 1080P
-                </span>
-                <span className="text-2xs font-mono px-1.5 py-0.5 rounded bg-black/60 text-zinc-400 backdrop-blur-sm">
+              {/* Live Subtitle Overlay Styled Like High-Retention Reels */}
+              {activePhrase && (
+                <div className="absolute inset-x-0 bottom-8 px-4 text-center pointer-events-none z-10">
+                  <span className="inline-block px-3 py-1.5 rounded bg-black/75 text-white font-extrabold text-sm md:text-base leading-tight tracking-wide uppercase drop-shadow-[0_2px_4px_rgba(0,0,0,0.95)]">
+                    {activePhrase.data.text}
+                  </span>
+                </div>
+              )}
+
+              {/* Timecode badge in player corner */}
+              <div className="absolute top-2.5 right-2.5 pointer-events-none z-10">
+                <span className="text-[10px] font-mono font-medium px-1.5 py-0.5 rounded bg-black/70 text-zinc-400 backdrop-blur-sm">
                   {formatTime(currentTime)}
                 </span>
               </div>
-
-              {/* Subtitle Overlay (Reels TikTok high-contrast styled caption) */}
-              <div className="relative z-10 px-4 pb-14 flex justify-center">
-                <div className="max-w-[88%] bg-black/85 backdrop-blur-md px-3.5 py-2 rounded-inner-btn border border-white/15 shadow-xl text-center">
-                  <p className="text-sm font-bold tracking-tight text-white drop-shadow-md">
-                    {activeSubtitle}
-                  </p>
-                </div>
-              </div>
             </div>
           </div>
 
-          {/* Transport Controls Bar (Bottom of preview panel) */}
-          <div className="h-12 border-t border-subtle-border bg-card px-4 flex items-center justify-between flex-shrink-0">
-            {/* Timecode display */}
-            <div className="flex items-center gap-1.5 font-mono text-xs">
-              <span className="text-zinc-100 font-semibold">{formatTime(currentTime)}</span>
-              <span className="text-zinc-600">/</span>
-              <span className="text-text-muted">{formatTime(totalVideoDuration)}</span>
-            </div>
-
-            {/* Transport controls (Strictly TypeUI nested radius: container 8px -> inner buttons 4px) */}
-            <div className="p-1 rounded-outer-box border border-subtle-border bg-app flex items-center gap-1 shadow-inner">
-              {/* To start */}
+          {/* Transport Bar (Clean, Centered, Proportional) */}
+          <div className="flex items-center justify-between pt-3 mt-2 border-t border-zinc-900 text-xs">
+            <div className="flex items-center gap-1.5">
               <button
-                type="button"
-                onClick={() => handleSeek(0)}
-                className="h-8 px-2.5 rounded-inner-btn hover:bg-card text-text-muted hover:text-text-main flex items-center justify-center transition-colors"
+                onClick={() => seekTo(0)}
+                className="w-7 h-7 rounded hover:bg-zinc-900 text-zinc-400 hover:text-zinc-200 flex items-center justify-center transition"
                 title="В начало (Home)"
               >
-                <SkipBack className="w-4 h-4" />
+                <SkipBack className="w-3.5 h-3.5" />
               </button>
-
-              {/* Play / Pause toggle */}
               <button
-                type="button"
                 onClick={togglePlay}
-                className="h-8 px-4 rounded-inner-btn bg-zinc-100 hover:bg-white text-zinc-950 font-medium flex items-center justify-center transition-all shadow-sm active:scale-95"
-                title="Воспроизведение / Пауза (Space)"
+                className="h-7 px-3 rounded bg-zinc-100 hover:bg-white text-zinc-950 font-medium flex items-center gap-1.5 transition shadow-sm"
               >
-                {isPlaying ? (
-                  <Pause className="w-4 h-4 fill-current" />
-                ) : (
-                  <Play className="w-4 h-4 fill-current translate-x-0.5" />
-                )}
+                {isPlaying ? <Pause className="w-3.5 h-3.5 fill-current" /> : <Play className="w-3.5 h-3.5 fill-current" />}
+                <span className="text-xs">{isPlaying ? 'Пауза' : 'Старт'}</span>
               </button>
-
-              {/* Next phrase */}
               <button
-                type="button"
-                onClick={handleJumpToNextPhrase}
-                className="h-8 px-2.5 rounded-inner-btn hover:bg-card text-text-muted hover:text-text-main flex items-center justify-center transition-colors"
-                title="К следующей реплике (Tab)"
+                onClick={() => seekTo(currentTime + 5)}
+                className="w-7 h-7 rounded hover:bg-zinc-900 text-zinc-400 hover:text-zinc-200 flex items-center justify-center transition"
+                title="Вперёд на 5 сек"
               >
-                <SkipForward className="w-4 h-4" />
+                <SkipForward className="w-3.5 h-3.5" />
               </button>
             </div>
 
-            {/* Quick volume & settings */}
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                className="h-8 px-2 rounded-inner-btn border border-subtle-border bg-app hover:bg-card text-text-muted hover:text-text-main flex items-center gap-1 text-xs transition-colors"
-                title="Громкость"
-              >
-                <Volume2 className="w-3.5 h-3.5" />
-                <span className="font-mono text-2xs">100%</span>
-              </button>
-              <button
-                type="button"
-                className="h-8 px-2 rounded-inner-btn border border-subtle-border bg-app hover:bg-card text-text-muted hover:text-text-main flex items-center gap-1 text-xs transition-colors"
-                title="Скорость воспроизведения"
-              >
-                <span className="font-mono text-2xs font-medium">1.0×</span>
-              </button>
-            </div>
-          </div>
-        </section>
-
-        {/* RIGHT PANE (40%): Transcription Panel with Phrases & Silence Pills */}
-        <section className="w-[40%] flex flex-col bg-card">
-          {/* Panel Header */}
-          <div className="h-10 px-4 border-b border-subtle-border bg-card flex items-center justify-between flex-shrink-0">
-            <div className="flex items-center gap-2">
-              <Captions className="w-4 h-4 text-zinc-300" />
-              <h2 className="text-xs font-semibold uppercase tracking-wider text-text-main">
-                Транскрипция
-              </h2>
-            </div>
-            <div className="flex items-center gap-2">
-              <span className="text-2xs text-text-dim font-mono">
-                4 фразы · {activeSilences.length} пауз
+            <div className="flex items-center gap-3 font-mono text-[11px]">
+              <span className="text-zinc-400">
+                <strong className="text-zinc-200 font-normal">{formatTime(currentTime)}</strong> / {formatTime(totalDuration)}
+              </span>
+              <span className="text-zinc-600">|</span>
+              <span className="text-zinc-400">
+                Чистое: <strong className="text-emerald-400 font-normal">{formatTime(remainingDuration)}</strong>
               </span>
             </div>
           </div>
 
-          {/* Quick filter input row (Strictly unified h-8 height) */}
-          <div className="p-3 border-b border-subtle-border bg-app/50 flex items-center gap-2 flex-shrink-0">
-            <input
-              type="text"
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Поиск по словам..."
-              className="h-8 px-3 flex-1 rounded-inner-btn bg-app border border-subtle-border text-xs text-text-main placeholder-text-dim focus:outline-none focus:border-zinc-500 transition-colors"
-            />
-            <button
-              type="button"
-              className="h-8 px-2.5 rounded-inner-btn border border-subtle-border bg-app hover:bg-card text-text-muted hover:text-text-main text-xs flex items-center gap-1 transition-colors"
-              title="Фильтры спикеров"
-            >
-              <Sliders className="w-3.5 h-3.5" />
-            </button>
+        </section>
+
+        {/* RIGHT PANE: Clean Narrative Script (Like Notion / Descript — Zero Card Clutter!) */}
+        <section className="flex-1 bg-zinc-900/40 flex flex-col justify-between overflow-hidden">
+          
+          {/* Header & Search */}
+          <div className="h-10 px-4 border-b border-zinc-800/80 bg-zinc-900/60 flex items-center justify-between flex-shrink-0">
+            <div className="flex items-center gap-2">
+              <span className="text-xs font-semibold text-zinc-300 uppercase tracking-wider">
+                Скрипт и редакция текста
+              </span>
+            </div>
+            
+            <div className="relative w-48">
+              <Search className="w-3 h-3 absolute left-2 top-2 text-zinc-500" />
+              <input
+                type="text"
+                placeholder="Поиск слова..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="w-full h-7 pl-6 pr-2 rounded bg-zinc-950/80 border border-zinc-800 text-[11px] text-zinc-200 placeholder-zinc-500 focus:outline-none focus:border-zinc-700"
+              />
+            </div>
           </div>
 
-          {/* Scrollable list of transcript items */}
-          <div className="flex-1 overflow-y-auto p-3 space-y-2">
+          {/* Script Body (Clean Typography, Natural Text Flow) */}
+          <div className="flex-1 overflow-y-auto p-5 space-y-4">
+            
+            <div className="text-xs text-zinc-500 font-mono mb-2">
+              Кликните по любому слову чтобы перейти в плеере. Паузы тишины встроены в текст.
+            </div>
+
             {items.map((item) => {
               if (item.type === 'phrase') {
-                const isActive =
-                  currentTime >= item.data.startTime &&
-                  currentTime <= item.data.endTime
-
+                const isActive = currentTime >= item.data.startTime && currentTime <= item.data.endTime
+                
                 return (
                   <div
                     key={item.data.id}
-                    onClick={() => handleSeek(item.data.startTime)}
-                    className={`rounded-outer-box border p-3 transition-all cursor-pointer ${
-                      isActive
-                        ? 'border-zinc-500 bg-zinc-800/60 shadow-md'
-                        : 'border-subtle-border bg-app hover:border-zinc-700/80 hover:bg-app/90'
+                    className={`group transition-all rounded p-2 -mx-2 ${
+                      isActive ? 'bg-zinc-800/40 ring-1 ring-zinc-700' : 'hover:bg-zinc-900/40'
                     }`}
                   >
-                    {/* Meta row */}
-                    <div className="flex items-center justify-between mb-1.5">
-                      <div className="flex items-center gap-2">
-                        <span className="text-2xs font-semibold text-zinc-300 bg-zinc-800 px-2 py-0.5 rounded-inner-btn border border-subtle-border">
-                          {item.data.speaker}
-                        </span>
-                        <span className="font-mono text-2xs text-text-dim">
-                          [{formatTime(item.data.startTime)} → {formatTime(item.data.endTime)}]
-                        </span>
-                      </div>
-                      <span className="font-mono text-2xs text-text-dim">
-                        {(item.data.endTime - item.data.startTime).toFixed(2)} с
+                    {/* Timecode badge */}
+                    <div className="flex items-center gap-2 text-[10px] font-mono text-zinc-500 mb-1">
+                      <span
+                        onClick={() => seekTo(item.data.startTime)}
+                        className="cursor-pointer hover:text-zinc-300 hover:underline"
+                      >
+                        {formatTime(item.data.startTime)} — {formatTime(item.data.endTime)}
                       </span>
                     </div>
 
-                    {/* Phrase content text with live edit */}
+                    {/* Clean Editable Text Paragraph */}
                     <textarea
                       rows={2}
                       value={item.data.text}
-                      onClick={(e) => e.stopPropagation()}
-                      onChange={(e) => handleUpdatePhraseText(item.data.id, e.target.value)}
-                      className="w-full bg-zinc-900 border border-zinc-800 rounded p-1.5 text-xs text-zinc-200 font-sans focus:outline-none focus:border-zinc-500 resize-none transition-colors"
+                      onChange={(e) => handleTextChange(item.data.id, e.target.value)}
+                      className="w-full bg-transparent text-sm leading-relaxed text-zinc-200 font-sans resize-none focus:outline-none focus:bg-zinc-950 focus:p-1.5 focus:rounded border border-transparent focus:border-zinc-700 transition-all"
                     />
                   </div>
                 )
               }
 
-              // Silence gap item
+              // Silence Item — Rendered as a Clean Minimal Inline Pill, NOT a Giant Red Box!
               if (item.type === 'silence') {
-                if (!showPauses && item.data.isCut) {
-                  return null
-                }
+                if (!showPauses && item.data.isCut) return null
 
                 return (
-                  <div
-                    key={item.data.id}
-                    className={`rounded-outer-box border p-2 flex items-center justify-between transition-all ${
-                      item.data.isCut
-                        ? 'border-zinc-800/80 bg-zinc-950/40 opacity-50'
-                        : 'border-silence-border bg-silence-pattern text-red-100 shadow-sm'
-                    }`}
-                  >
-                    <div className="flex items-center gap-2">
-                      <div
-                        className={`w-5 h-5 rounded-inner-btn flex items-center justify-center ${
-                          item.data.isCut ? 'bg-zinc-800 text-zinc-500' : 'bg-red-950 text-red-400 border border-red-500/40'
-                        }`}
-                      >
-                        <Clock className="w-3 h-3" />
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <span
-                          className={`text-xs font-mono font-medium ${
-                            item.data.isCut ? 'text-zinc-500 line-through' : 'text-red-200'
-                          }`}
-                        >
-                          Пауза: {item.data.duration.toFixed(2)} с
-                        </span>
-                        <span className="text-2xs font-mono text-zinc-500">
-                          ({formatTime(item.data.startTime)} - {formatTime(item.data.endTime)})
-                        </span>
-                      </div>
-                    </div>
-
-                    {/* Cut / Restore button (Strictly unified h-7 or h-8 in row) */}
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation()
-                        handleCutSingleSilence(item.data.id)
-                      }}
-                      className={`h-7 px-2.5 rounded-inner-btn text-2xs font-medium flex items-center gap-1.5 transition-colors ${
+                  <div key={item.data.id} className="py-1 flex items-center gap-2">
+                    <span
+                      onClick={() => toggleSilenceCut(item.data.id)}
+                      className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-mono cursor-pointer transition select-none ${
                         item.data.isCut
-                          ? 'border border-subtle-border bg-zinc-800 hover:bg-zinc-700 text-zinc-300'
-                          : 'border border-red-500/60 bg-red-950 hover:bg-red-900 text-red-100'
+                          ? 'bg-zinc-900 text-zinc-500 line-through border border-zinc-800 hover:bg-zinc-850'
+                          : 'bg-red-950/40 text-red-300 border border-red-900/60 hover:bg-red-900/40'
                       }`}
+                      title="Кликните чтобы вырезать или оставить паузу"
                     >
-                      {item.data.isCut ? (
-                        <>
-                          <RotateCcw className="w-3 h-3 text-zinc-400" />
-                          <span>Восстановить</span>
-                        </>
-                      ) : (
-                        <>
-                          <Scissors className="w-3 h-3 text-red-400" />
-                          <span>Вырезать</span>
-                        </>
-                      )}
-                    </button>
+                      <span>⏸ Пауза {item.data.duration.toFixed(1)}с</span>
+                      <span className="text-[10px] font-sans font-medium px-1 rounded bg-black/40">
+                        {item.data.isCut ? 'вырезано' : 'вырезать ✂'}
+                      </span>
+                    </span>
                   </div>
                 )
               }
 
               return null
             })}
+
           </div>
+
         </section>
+
       </div>
 
-      {/* =========================================================================
-          3. BOTTOM TIMELINE (Master Timeline)
-          Time ruler, video clips track, audio waveform track with silence hatches,
-          and a 1px playhead.
-         ========================================================================= */}
-      <footer className="h-52 border-t border-subtle-border bg-card flex flex-col select-none flex-shrink-0 z-20">
-        {/* Timeline toolbar (Unified h-8 row controls) */}
-        <div className="h-8 px-4 border-b border-subtle-border bg-card flex items-center justify-between text-xs">
-          <div className="flex items-center gap-3">
-            <span className="font-semibold text-2xs uppercase tracking-wider text-text-muted flex items-center gap-1.5">
-              <Layers className="w-3.5 h-3.5 text-zinc-400" />
-              Мастер-Таймлайн
-            </span>
-            <div className="h-3 w-px bg-subtle-border" />
-            <span className="text-2xs font-mono text-text-dim">
-              FPS: 60 · Длина: {formatTime(totalVideoDuration)}
-            </span>
-          </div>
-
-          {/* Zoom & Track settings */}
-          <div className="flex items-center gap-2">
-            <div className="p-0.5 rounded-outer-box border border-subtle-border bg-app flex items-center gap-1">
-              <button
-                type="button"
-                onClick={() => setZoomLevel((z) => Math.max(50, z - 25))}
-                className="w-6 h-6 rounded-inner-btn flex items-center justify-center hover:bg-card text-text-muted hover:text-text-main transition-colors"
-                title="Уменьшить масштаб"
-              >
-                <ZoomOut className="w-3.5 h-3.5" />
-              </button>
-              <span className="text-2xs font-mono px-1.5 text-zinc-400">{zoomLevel}%</span>
-              <button
-                type="button"
-                onClick={() => setZoomLevel((z) => Math.min(200, z + 25))}
-                className="w-6 h-6 rounded-inner-btn flex items-center justify-center hover:bg-card text-text-muted hover:text-text-main transition-colors"
-                title="Увеличить масштаб"
-              >
-                <ZoomIn className="w-3.5 h-3.5" />
-              </button>
-            </div>
-          </div>
+      {/* 3. BOTTOM TIMELINE: Single Continuous Pro Track (Height 100px) */}
+      <footer className="h-28 border-t border-zinc-800/80 bg-zinc-900/80 flex flex-col justify-between select-none flex-shrink-0 z-20">
+        
+        {/* Time ruler ticks */}
+        <div className="h-5 px-3 flex justify-between items-center text-[10px] font-mono text-zinc-500 border-b border-zinc-800/40">
+          <span>00:00</span>
+          <span>00:05</span>
+          <span>00:10</span>
+          <span>00:15</span>
+          <span>{formatTime(totalDuration)}</span>
         </div>
 
-        {/* Master Timeline Canvas Area */}
+        {/* Master Audio Track Canvas */}
         <div
-          className="flex-1 relative flex flex-col overflow-x-auto overflow-y-hidden bg-app cursor-crosshair"
-          onClick={(e) => {
-            const rect = e.currentTarget.getBoundingClientRect()
-            const clickX = e.clientX - rect.left
-            const progress = Math.max(0, Math.min(1, clickX / rect.width))
-            handleSeek(progress * totalVideoDuration)
-          }}
+          ref={timelineRef}
+          onClick={handleTimelineClick}
+          className="relative flex-1 bg-zinc-950 cursor-pointer overflow-hidden flex items-center"
         >
-          {/* Time ruler bar */}
-          <div className="h-6 border-b border-subtle-border bg-zinc-950/80 flex items-center text-2xs font-mono text-zinc-500 relative px-2">
-            {[0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20].map((sec) => {
-              const leftPercent = (sec / totalVideoDuration) * 100
-              return (
-                <div
-                  key={sec}
-                  className="absolute flex flex-col items-start"
-                  style={{ left: `${leftPercent}%` }}
-                >
-                  <span className="text-[10px] text-zinc-500">
-                    {String(Math.floor(sec / 60)).padStart(2, '0')}:{String(sec % 60).padStart(2, '0')}
-                  </span>
-                  <div className="w-px h-1.5 bg-zinc-700 mt-0.5" />
-                </div>
-              )
-            })}
+          {/* Continuous Dense Waveform Bars */}
+          <div className="absolute inset-0 flex items-center justify-between px-2 pointer-events-none">
+            {waveform.map((peak, idx) => (
+              <div
+                key={idx}
+                className="w-[2px] bg-zinc-400 rounded-full transition-all"
+                style={{ height: `${Math.max(8, peak * 0.7)}%` }}
+              />
+            ))}
           </div>
 
-          {/* Timeline Tracks Container */}
-          <div className="flex-1 flex flex-col justify-around p-2 gap-1.5 relative">
-            {/* Track 1: Video Track */}
-            <div className="h-8 rounded-outer-box bg-zinc-900 border border-subtle-border relative overflow-hidden flex items-center">
-              <span className="absolute left-2 text-2xs font-mono text-zinc-400 z-10 select-none">
-                VIDEO 1
-              </span>
-              {/* Segment representation */}
-              <div className="absolute inset-0 flex">
-                {items
-                  .filter((i) => i.type === 'phrase')
-                  .map((phrase, idx) => {
-                    const left = (phrase.data.startTime / totalVideoDuration) * 100
-                    const width =
-                      ((phrase.data.endTime - phrase.data.startTime) /
-                        totalVideoDuration) *
-                      100
-                    return (
-                      <div
-                        key={phrase.data.id}
-                        style={{ left: `${left}%`, width: `${width}%` }}
-                        className="absolute h-full bg-zinc-800/80 border-r border-zinc-700/50 flex items-center justify-center text-2xs text-zinc-400 truncate px-1"
-                      >
-                        Клип {idx + 1}
-                      </div>
-                    )
-                  })}
+          {/* Silence Overlay Zones on the Waveform */}
+          {silences.map((silence) => {
+            const left = (silence.data.startTime / totalDuration) * 100
+            const width = (silence.data.duration / totalDuration) * 100
+            const isCut = silence.data.isCut
+
+            return (
+              <div
+                key={silence.data.id}
+                onClick={(e) => {
+                  e.stopPropagation()
+                  toggleSilenceCut(silence.data.id)
+                }}
+                style={{ left: `${left}%`, width: `${width}%` }}
+                className={`absolute top-0 bottom-0 flex items-center justify-center transition-all ${
+                  isCut
+                    ? 'bg-zinc-950/85 border-x border-zinc-800 opacity-60'
+                    : 'bg-red-950/35 border-x border-red-700/80 hover:bg-red-950/50'
+                }`}
+                title={`Пауза: ${silence.data.duration.toFixed(1)}с. Кликните чтобы вырезать`}
+              >
+                <span
+                  className={`text-[9px] font-mono px-1 py-0.5 rounded shadow-sm ${
+                    isCut
+                      ? 'bg-zinc-900 text-zinc-500 line-through'
+                      : 'bg-red-950 text-red-300 border border-red-800/80'
+                  }`}
+                >
+                  {isCut ? '✂' : `${silence.data.duration.toFixed(1)}с`}
+                </span>
               </div>
-            </div>
+            )
+          })}
 
-            {/* Track 2: Audio Waveform with Silence Hatches */}
-            <div className="h-14 rounded-outer-box bg-zinc-900/90 border border-subtle-border relative overflow-hidden flex items-center">
-              <span className="absolute left-2 top-1 text-2xs font-mono text-zinc-400 z-10 select-none">
-                AUDIO (WAVEFORM)
-              </span>
-
-              {/* Synthesized / real waveform peaks */}
-              <div className="absolute inset-0 flex items-center justify-between px-3 pt-2">
-                {waveformPoints.map((peak, idx) => (
-                  <div
-                    key={idx}
-                    className="w-1 bg-zinc-500/70 rounded-full"
-                    style={{ height: `${Math.max(10, peak * 0.45)}px` }}
-                  />
-                ))}
-              </div>
-
-              {/* Silence Hatch Overlays */}
-              {silences.map((silence) => {
-                const left = (silence.data.startTime / totalVideoDuration) * 100
-                const width = (silence.data.duration / totalVideoDuration) * 100
-                const isCut = silence.data.isCut
-
-                return (
-                  <div
-                    key={silence.data.id}
-                    style={{ left: `${left}%`, width: `${width}%` }}
-                    className={`absolute top-0 bottom-0 flex flex-col items-center justify-center border-l border-r transition-all ${
-                      isCut
-                        ? 'border-zinc-800 bg-zinc-950/80 opacity-40'
-                        : 'border-silence-border bg-silence-pattern'
-                    }`}
-                  >
-                    {!isCut && (
-                      <span className="text-[10px] font-mono font-medium text-red-200 bg-red-950/90 px-1 py-0.5 rounded border border-red-500/40">
-                        {silence.data.duration.toFixed(1)}s
-                      </span>
-                    )}
-                  </div>
-                )
-              })}
-            </div>
-
-            {/* Track 3: Subtitles / Captions Track */}
-            <div className="h-6 rounded-outer-box bg-zinc-900/70 border border-subtle-border relative overflow-hidden flex items-center">
-              <span className="absolute left-2 text-2xs font-mono text-zinc-400 z-10 select-none">
-                SUBTITLES
-              </span>
-              <div className="absolute inset-0 flex">
-                {items
-                  .filter((i) => i.type === 'phrase')
-                  .map((phrase) => {
-                    const left = (phrase.data.startTime / totalVideoDuration) * 100
-                    const width =
-                      ((phrase.data.endTime - phrase.data.startTime) /
-                        totalVideoDuration) *
-                      100
-                    return (
-                      <div
-                        key={phrase.data.id}
-                        style={{ left: `${left}%`, width: `${width}%` }}
-                        className="absolute h-full bg-zinc-700/50 border-r border-zinc-600/40 flex items-center px-1 text-[10px] text-zinc-300 truncate"
-                      >
-                        {phrase.data.text}
-                      </div>
-                    )
-                  })}
-              </div>
-            </div>
-
-            {/* 1px Playhead Line with Handle */}
-            <div
-              className="absolute top-0 bottom-0 w-px bg-red-500 z-30 pointer-events-none transition-all duration-75"
-              style={{
-                left: `${(currentTime / totalVideoDuration) * 100}%`,
-              }}
-            >
-              {/* Playhead Head Marker */}
-              <div className="w-3 h-3 bg-red-500 rotate-45 -ml-1.5 -top-1.5 absolute rounded-[1px] shadow-sm" />
-            </div>
+          {/* Precision 1px Red Playhead Needle */}
+          <div
+            className="absolute top-0 bottom-0 w-px bg-red-500 z-30 pointer-events-none transition-all duration-75"
+            style={{ left: `${(currentTime / totalDuration) * 100}%` }}
+          >
+            <div className="w-2.5 h-2.5 bg-red-500 rotate-45 -ml-[4px] -top-1 absolute shadow-sm" />
           </div>
         </div>
+
+        {/* Timeline Bottom Legend */}
+        <div className="h-6 px-4 bg-zinc-900 border-t border-zinc-800/50 flex items-center justify-between text-[10px] font-mono text-zinc-500">
+          <div className="flex items-center gap-3">
+            <span>Клик по таймлайну: переместить курсор</span>
+            <span>•</span>
+            <span>Пробел: Старт/Пауза</span>
+          </div>
+          <div>
+            <span>FFmpeg: silencedetect=-30dB</span>
+          </div>
+        </div>
+
       </footer>
+
     </div>
   )
 }
