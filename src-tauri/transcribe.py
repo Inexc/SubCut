@@ -2,9 +2,16 @@ import sys
 import json
 import os
 
+if sys.platform == 'win32':
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+        sys.stderr.reconfigure(encoding='utf-8')
+    except Exception:
+        pass
+
 def transcribe(video_path):
     import faster_whisper
-    # Use tiny or base model (fast and accurate on CPU)
+    # Use base model (fast and accurate on CPU)
     model = faster_whisper.WhisperModel('base', device='cpu', compute_type='int8')
     segments, info = model.transcribe(video_path, beam_size=1)
     
@@ -26,13 +33,14 @@ def transcribe(video_path):
 
 if __name__ == '__main__':
     if len(sys.argv) < 2:
-        print(json.dumps([]))
+        sys.stdout.buffer.write(b'[]')
         sys.exit(0)
         
     path = sys.argv[1]
     try:
         data = transcribe(path)
-        print(json.dumps(data, ensure_ascii=False))
+        output_bytes = json.dumps(data, ensure_ascii=False).encode('utf-8')
+        sys.stdout.buffer.write(output_bytes)
     except Exception as e:
         sys.stderr.write(f'Whisper error: {e}\n')
-        print(json.dumps([]))
+        sys.stdout.buffer.write(b'[]')

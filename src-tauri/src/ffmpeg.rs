@@ -249,6 +249,7 @@ pub fn export_trimmed_video(
 pub fn transcribe_speech(path: &str) -> Result<Vec<Phrase>, String> {
     let script_path = concat!(env!("CARGO_MANIFEST_DIR"), "\\transcribe.py");
     let output = Command::new("python")
+        .env("PYTHONIOENCODING", "utf-8")
         .args(&[script_path, path])
         .output()
         .map_err(|e| format!("Не удалось вызвать Whisper: {}", e))?;
