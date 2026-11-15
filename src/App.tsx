@@ -136,6 +136,8 @@ export default function App() {
 
   const videoRef = useRef<HTMLVideoElement>(null)
   const timelineRef = useRef<HTMLDivElement>(null)
+  const isSkippingRef = useRef<boolean>(false)
+  const lastSkippedIdRef = useRef<string | null>(null)
 
   // Derived stats
   const silences = items.filter((i): i is { type: 'silence'; data: SilenceGap } => i.type === 'silence')
@@ -272,29 +274,42 @@ export default function App() {
     }
   }
 
-  // Padding constants to keep natural speech decay and onset (no cut-off consonants or sudden jump-cuts)
-  const PAD_OUT = 0.12 // 120ms natural voice decay tail
-  const PAD_IN = 0.10  // 100ms consonant/breath onset
-
   // Real-time Auto-Skip Cut Silences during playback
   const handleTimeUpdate = () => {
     if (!videoRef.current) return
     const t = videoRef.current.currentTime
     setCurrentTime(t)
 
-    // Check if current time falls inside a cut silence (respecting smooth edge padding)
+    // Ignore while already seeking or jumping to prevent infinite loops
+    if (videoRef.current.seeking || isSkippingRef.current) return
+
+    const PAD_OUT = 0.12 // 120ms natural voice decay tail
+    const PAD_IN = 0.08  // 80ms natural voice onset
+
     const currentCut = items.find(
       (item): item is { type: 'silence'; data: SilenceGap } => {
         if (item.type !== 'silence' || !item.data.isCut) return false
         const effStart = item.data.startTime + PAD_OUT
         const effEnd = item.data.endTime - PAD_IN
-        return effEnd > effStart + 0.08 && t >= effStart && t < effEnd
+        return effEnd > effStart + 0.05 && t >= effStart && t < effEnd
       }
     )
 
     if (currentCut) {
-      const targetTime = Math.max(0, currentCut.data.endTime - PAD_IN)
-      videoRef.current.currentTime = targetTime
+      if (lastSkippedIdRef.current !== currentCut.data.id) {
+        isSkippingRef.current = true
+        lastSkippedIdRef.current = currentCut.data.id
+
+        // Jump cleanly past the cut point
+        const targetTime = Math.min(totalDuration, currentCut.data.endTime - PAD_IN + 0.01)
+        videoRef.current.currentTime = targetTime
+
+        setTimeout(() => {
+          isSkippingRef.current = false
+        }, 80)
+      }
+    } else {
+      lastSkippedIdRef.current = null
     }
   }
 
