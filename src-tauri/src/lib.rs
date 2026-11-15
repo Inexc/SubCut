@@ -1,8 +1,8 @@
 mod ffmpeg;
 
 use ffmpeg::{
-    detect_silence, export_project_edl, export_subtitles_srt, export_trimmed_video,
-    extract_waveform, Phrase, SilenceGap,
+    detect_silence, export_audio_only, export_cover_image, export_project_edl,
+    export_subtitles_srt, export_trimmed_video, extract_waveform, Phrase, SilenceGap,
 };
 
 fn get_video_duration(path: &str) -> f64 {
@@ -206,7 +206,12 @@ async fn export_trimmed_video_cmd(
     subtitle_preset: String,
     phrases: Vec<Phrase>,
     hardware_accel: String,
+    framing_mode: Option<String>,
+    color_preset: Option<String>,
+    target_bitrate_kbps: Option<u32>,
 ) -> Result<(), String> {
+    let framing = framing_mode.unwrap_or_else(|| "original".to_string());
+    let color = color_preset.unwrap_or_else(|| "none".to_string());
     tauri::async_runtime::spawn_blocking(move || {
         export_trimmed_video(
             &input_path,
@@ -217,10 +222,65 @@ async fn export_trimmed_video_cmd(
             &subtitle_preset,
             &phrases,
             &hardware_accel,
+            &framing,
+            &color,
+            target_bitrate_kbps,
         )
     })
     .await
     .map_err(|e| format!("Не удалось смонтировать видео: {}", e))?
+}
+
+#[tauri::command]
+async fn calculate_telegram_video_bitrate_cmd(
+    duration_sec: f64,
+    max_megabytes: Option<f64>,
+) -> Result<u32, String> {
+    let mb = max_megabytes.unwrap_or(46.0);
+    Ok(ffmpeg::calculate_telegram_video_bitrate(duration_sec, mb))
+}
+
+#[tauri::command]
+async fn export_cover_image_cmd(
+    input_path: String,
+    time: f64,
+    output_path: String,
+    framing_mode: Option<String>,
+    color_preset: Option<String>,
+    title_text: Option<String>,
+    title_style: Option<String>,
+) -> Result<(), String> {
+    let framing = framing_mode.unwrap_or_else(|| "original".to_string());
+    let color = color_preset.unwrap_or_else(|| "none".to_string());
+    tauri::async_runtime::spawn_blocking(move || {
+        export_cover_image(
+            &input_path,
+            time,
+            &output_path,
+            &framing,
+            &color,
+            title_text.as_deref(),
+            title_style.as_deref(),
+        )
+    })
+    .await
+    .map_err(|e| format!("Не удалось сохранить обложку: {}", e))?
+}
+
+#[tauri::command]
+async fn export_audio_only_cmd(
+    input_path: String,
+    cuts: Vec<(f64, f64)>,
+    output_path: String,
+    total_duration: f64,
+    bitrate_kbps: Option<u32>,
+) -> Result<(), String> {
+    let br = bitrate_kbps.unwrap_or(320);
+    tauri::async_runtime::spawn_blocking(move || {
+        export_audio_only(&input_path, &cuts, total_duration, &output_path, br)
+    })
+    .await
+    .map_err(|e| format!("Не удалось экспортировать аудио: {}", e))?
 }
 
 #[tauri::command]
@@ -265,7 +325,10 @@ pub fn run() {
             select_video_file_cmd,
             select_output_file_cmd,
             select_save_file_cmd,
+            calculate_telegram_video_bitrate_cmd,
             export_trimmed_video_cmd,
+            export_cover_image_cmd,
+            export_audio_only_cmd,
             export_subtitles_srt_cmd,
             export_project_edl_cmd
         ])

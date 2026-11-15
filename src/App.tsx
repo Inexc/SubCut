@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react'
+import { useState, useRef, useEffect, useMemo } from 'react'
 import { invoke, convertFileSrc } from '@tauri-apps/api/core'
 import {
   Scissors,
@@ -21,7 +21,28 @@ import {
   Clapperboard,
   Zap,
   Globe,
+  Image as ImageIcon,
+  Music,
+  Send,
+  Palette,
+  Smartphone,
+  Monitor,
 } from 'lucide-react'
+
+export type ColorPreset = 'none' | 'anime_punch' | 'cinematic' | 'crisp'
+
+export function getColorFilterStyle(preset: ColorPreset): string {
+  switch (preset) {
+    case 'anime_punch':
+      return 'saturate(1.25) contrast(1.12)'
+    case 'cinematic':
+      return 'contrast(1.18) brightness(0.97) saturate(0.95)'
+    case 'crisp':
+      return 'contrast(1.06) brightness(1.02)'
+    default:
+      return 'none'
+  }
+}
 
 interface Word {
   word: string
@@ -174,7 +195,22 @@ export default function App() {
   const [isSettingsOpen, setIsSettingsOpen] = useState<boolean>(false)
   const [isExportMenuOpen, setIsExportMenuOpen] = useState<boolean>(false)
 
+  // Framing & Visual Presets
+  const [framingMode, setFramingMode] = useState<'original' | 'blur_9_16'>('original')
+  const [colorPreset, setColorPreset] = useState<ColorPreset>('none')
+
+  // Cover Generator Modal State
+  const [isCoverModalOpen, setIsCoverModalOpen] = useState<boolean>(false)
+  const [coverTime, setCoverTime] = useState<number>(0)
+  const [coverTitle, setCoverTitle] = useState<string>('')
+  const [coverTitleStyle, setCoverTitleStyle] = useState<'hormozi' | 'neon' | 'clean' | 'none'>('hormozi')
+  const [coverFraming, setCoverFraming] = useState<'original' | 'blur_9_16'>('blur_9_16')
+  const [coverColor, setCoverColor] = useState<ColorPreset>('none')
+
   const videoRef = useRef<HTMLVideoElement>(null)
+  const bgVideoRef = useRef<HTMLVideoElement>(null)
+  const coverVideoRef = useRef<HTMLVideoElement>(null)
+  const coverBgRef = useRef<HTMLVideoElement>(null)
   const timelineRef = useRef<HTMLDivElement>(null)
   const isSkippingRef = useRef<boolean>(false)
   const lastSkippedIdRef = useRef<string | null>(null)
@@ -193,6 +229,20 @@ export default function App() {
     return currentTime >= p.data.startTime && currentTime <= maxEnd
   })
   const activePhrase = activePhraseIndex >= 0 ? phraseList[activePhraseIndex] : null
+
+  // Evenly sampled phrases across duration for quick cover keyframe badges
+  const sampledCoverPhrases = useMemo(() => {
+    if (phraseList.length <= 10) return phraseList
+    const step = phraseList.length / 10
+    const res: typeof phraseList = []
+    for (let i = 0; i < 10; i++) {
+      const idx = Math.min(phraseList.length - 1, Math.floor(i * step))
+      if (!res.some((item) => item.data.id === phraseList[idx].data.id)) {
+        res.push(phraseList[idx])
+      }
+    }
+    return res
+  }, [phraseList])
 
   // Calculate pause gaps directly from speech timestamps
   const calculateSpeechGaps = (
@@ -469,9 +519,11 @@ export default function App() {
     if (!videoRef.current) return
     if (isPlaying) {
       videoRef.current.pause()
+      bgVideoRef.current?.pause()
       setIsPlaying(false)
     } else {
       videoRef.current.play().catch(console.error)
+      bgVideoRef.current?.play().catch(() => {})
       setIsPlaying(true)
     }
   }
@@ -485,13 +537,39 @@ export default function App() {
     if (videoRef.current) {
       videoRef.current.currentTime = clamped
     }
+    if (bgVideoRef.current) {
+      bgVideoRef.current.currentTime = clamped
+    }
   }
+
+  // Cover modal time scrubbing
+  const updateCoverTime = (time: number) => {
+    const clamped = Math.max(0, Math.min(totalDuration || 0, time))
+    setCoverTime(clamped)
+    if (coverVideoRef.current) {
+      coverVideoRef.current.currentTime = clamped
+    }
+    if (coverBgRef.current) {
+      coverBgRef.current.currentTime = clamped
+    }
+  }
+
+  useEffect(() => {
+    if (isCoverModalOpen) {
+      if (coverVideoRef.current) coverVideoRef.current.currentTime = coverTime
+      if (coverBgRef.current) coverBgRef.current.currentTime = coverTime
+    }
+  }, [isCoverModalOpen])
 
   // Real-time Auto-Skip Cut Silences during playback
   const handleTimeUpdate = () => {
     if (!videoRef.current) return
     const t = videoRef.current.currentTime
     setCurrentTime(t)
+
+    if (bgVideoRef.current && Math.abs(bgVideoRef.current.currentTime - t) > 0.15) {
+      bgVideoRef.current.currentTime = t
+    }
 
     if (videoRef.current.seeking || isSkippingRef.current) return
 
@@ -519,11 +597,18 @@ export default function App() {
 
         if (targetTime >= totalDuration) {
           videoRef.current.currentTime = totalDuration
+          if (bgVideoRef.current) {
+            bgVideoRef.current.currentTime = totalDuration
+            bgVideoRef.current.pause()
+          }
           videoRef.current.pause()
           setIsPlaying(false)
           isSkippingRef.current = false
         } else {
           videoRef.current.currentTime = targetTime
+          if (bgVideoRef.current) {
+            bgVideoRef.current.currentTime = targetTime
+          }
           setTimeout(() => {
             isSkippingRef.current = false
           }, 40)
@@ -614,7 +699,7 @@ export default function App() {
     )
   }
 
-  // Export 1: Trimmed MP4 video
+  // Export 1: Trimmed MP4 video (current settings)
   const handleExportMP4 = async () => {
     try {
       if (!filePath) {
@@ -652,10 +737,195 @@ export default function App() {
         subtitlePreset,
         phrases: phrasesToExport,
         hardwareAccel,
+        framingMode,
+        colorPreset,
+        targetBitrateKbps: null,
       })
       alert(`Видео сохранено:\n${outputPath}`)
     } catch (err) {
       alert(`Ошибка экспорта: ${err}`)
+    } finally {
+      setIsExporting(false)
+    }
+  }
+
+  // Export 1-Click: Instagram Reels & Shorts (1080x1920 HQ with blurred background)
+  const handleExportReels = async () => {
+    try {
+      if (!filePath) {
+        alert('Сначала выберите видеофайл')
+        return
+      }
+
+      const cuts = items
+        .filter((i): i is { type: 'silence'; data: SilenceGap } => i.type === 'silence' && i.data.isCut)
+        .map((s) => [s.data.startTime, s.data.endTime])
+        .filter(([start, end]) => end > start)
+
+      const phrasesToExport = items
+        .filter((i): i is { type: 'phrase'; data: Phrase } => i.type === 'phrase')
+        .map((p) => p.data)
+
+      const baseName = filePath.split(/[\\/]/).pop()?.replace(/\.[^/.]+$/, '') || 'reels'
+      const defaultName = `${baseName}_reels_1080x1920.mp4`
+
+      const outputPath = await invoke<string | null>('select_save_file_cmd', {
+        title: 'Экспорт для Instagram Reels и Shorts',
+        filter: 'MP4 Видео (*.mp4)|*.mp4',
+        defaultName,
+      })
+      if (!outputPath) return
+
+      setIsExporting(true)
+      setIsExportMenuOpen(false)
+      await invoke('export_trimmed_video_cmd', {
+        inputPath: filePath,
+        cuts,
+        outputPath,
+        totalDuration,
+        burnSubtitles: true,
+        subtitlePreset,
+        phrases: phrasesToExport,
+        hardwareAccel,
+        framingMode: 'blur_9_16',
+        colorPreset,
+        targetBitrateKbps: null,
+      })
+      alert(`Видео для Reels/Shorts успешно сохранено:\n${outputPath}`)
+    } catch (err) {
+      alert(`Ошибка экспорта для Reels: ${err}`)
+    } finally {
+      setIsExporting(false)
+    }
+  }
+
+  // Export 1-Click: Telegram Compact (< 50 MB)
+  const handleExportTelegram = async () => {
+    try {
+      if (!filePath) {
+        alert('Сначала выберите видеофайл')
+        return
+      }
+
+      const cuts = items
+        .filter((i): i is { type: 'silence'; data: SilenceGap } => i.type === 'silence' && i.data.isCut)
+        .map((s) => [s.data.startTime, s.data.endTime])
+        .filter(([start, end]) => end > start)
+
+      const phrasesToExport = items
+        .filter((i): i is { type: 'phrase'; data: Phrase } => i.type === 'phrase')
+        .map((p) => p.data)
+
+      const baseName = filePath.split(/[\\/]/).pop()?.replace(/\.[^/.]+$/, '') || 'telegram'
+      const defaultName = `${baseName}_telegram_under50mb.mp4`
+
+      const targetBitrate = await invoke<number>('calculate_telegram_video_bitrate_cmd', {
+        durationSec: remainingDuration,
+        maxMegabytes: 46.0,
+      })
+
+      const outputPath = await invoke<string | null>('select_save_file_cmd', {
+        title: 'Экспорт для Telegram (< 50 МБ)',
+        filter: 'MP4 Видео (*.mp4)|*.mp4',
+        defaultName,
+      })
+      if (!outputPath) return
+
+      setIsExporting(true)
+      setIsExportMenuOpen(false)
+      await invoke('export_trimmed_video_cmd', {
+        inputPath: filePath,
+        cuts,
+        outputPath,
+        totalDuration,
+        burnSubtitles,
+        subtitlePreset,
+        phrases: phrasesToExport,
+        hardwareAccel,
+        framingMode,
+        colorPreset,
+        targetBitrateKbps: targetBitrate,
+      })
+      alert(`Компактное видео для Telegram сохранено:\n${outputPath}`)
+    } catch (err) {
+      alert(`Ошибка экспорта для Telegram: ${err}`)
+    } finally {
+      setIsExporting(false)
+    }
+  }
+
+  // Export 1-Click: Audio only (MP3 320 kbps)
+  const handleExportAudioOnly = async () => {
+    try {
+      if (!filePath) {
+        alert('Сначала выберите видеофайл')
+        return
+      }
+
+      const cuts = items
+        .filter((i): i is { type: 'silence'; data: SilenceGap } => i.type === 'silence' && i.data.isCut)
+        .map((s) => [s.data.startTime, s.data.endTime])
+        .filter(([start, end]) => end > start)
+
+      const baseName = filePath.split(/[\\/]/).pop()?.replace(/\.[^/.]+$/, '') || 'audio'
+      const defaultName = `${baseName}_clean_voice.mp3`
+
+      const outputPath = await invoke<string | null>('select_save_file_cmd', {
+        title: 'Экспорт аудио MP3 (320 kbps)',
+        filter: 'MP3 Аудио (*.mp3)|*.mp3',
+        defaultName,
+      })
+      if (!outputPath) return
+
+      setIsExporting(true)
+      setIsExportMenuOpen(false)
+      await invoke('export_audio_only_cmd', {
+        inputPath: filePath,
+        cuts,
+        outputPath,
+        totalDuration,
+        bitrateKbps: 320,
+      })
+      alert(`Чистый звук без пауз сохранён:\n${outputPath}`)
+    } catch (err) {
+      alert(`Ошибка экспорта аудио: ${err}`)
+    } finally {
+      setIsExporting(false)
+    }
+  }
+
+  // Export Cover Image
+  const handleExportCover = async () => {
+    try {
+      if (!filePath) {
+        alert('Сначала выберите видеофайл')
+        return
+      }
+
+      const baseName = filePath.split(/[\\/]/).pop()?.replace(/\.[^/.]+$/, '') || 'cover'
+      const defaultName = `${baseName}_cover_${Math.round(coverTime)}s.png`
+
+      const outputPath = await invoke<string | null>('select_save_file_cmd', {
+        title: 'Сохранить обложку для Reels/Shorts',
+        filter: 'PNG Изображение (*.png)|*.png|JPEG Изображение (*.jpg)|*.jpg',
+        defaultName,
+      })
+      if (!outputPath) return
+
+      setIsExporting(true)
+      await invoke('export_cover_image_cmd', {
+        inputPath: filePath,
+        time: coverTime,
+        outputPath,
+        framingMode: coverFraming,
+        colorPreset: coverColor,
+        titleText: coverTitleStyle !== 'none' && coverTitle.trim() ? coverTitle.trim() : null,
+        titleStyle: coverTitleStyle,
+      })
+      alert(`Обложка сохранена:\n${outputPath}`)
+      setIsCoverModalOpen(false)
+    } catch (err) {
+      alert(`Ошибка сохранения обложки: ${err}`)
     } finally {
       setIsExporting(false)
     }
@@ -883,6 +1153,29 @@ export default function App() {
             </button>
           )}
 
+          {/* Smart Cover Generator Button */}
+          <button
+            onClick={() => {
+              if (isPlaying && videoRef.current) {
+                videoRef.current.pause()
+                bgVideoRef.current?.pause()
+                setIsPlaying(false)
+              }
+              if (!coverTitle) {
+                const punchy = phraseList.find((p) => p.data.text.length >= 10 && p.data.text.length <= 60) || phraseList[0]
+                if (punchy) setCoverTitle(punchy.data.text)
+              }
+              updateCoverTime(currentTime)
+              setIsCoverModalOpen(true)
+            }}
+            disabled={!filePath || isAnalyzing}
+            className="h-7 px-2.5 rounded text-xs font-medium bg-zinc-800/60 hover:bg-zinc-800 border border-zinc-700/60 text-zinc-300 hover:text-white flex items-center gap-1.5 transition disabled:opacity-40"
+            title="Генератор обложки для Reels и Shorts"
+          >
+            <ImageIcon className="w-3.5 h-3.5 text-indigo-400" />
+            <span className="hidden sm:inline">Обложка</span>
+          </button>
+
           {/* Export Dropdown */}
           <div className="relative">
             <button
@@ -896,15 +1189,48 @@ export default function App() {
 
             {/* Export Menu Dropdown */}
             {isExportMenuOpen && (
-              <div className="absolute right-0 top-8 w-56 bg-zinc-900 border border-zinc-800 rounded-lg shadow-2xl py-1.5 z-40 text-xs animate-in fade-in duration-100">
+              <div className="absolute right-0 top-8 w-64 bg-zinc-900 border border-zinc-800 rounded-lg shadow-2xl py-1.5 z-40 text-xs animate-in fade-in duration-100">
+                <button
+                  onClick={handleExportReels}
+                  className="w-full px-3 py-2 text-left hover:bg-zinc-800/80 flex items-center gap-2.5 text-zinc-200 transition"
+                >
+                  <Sparkles className="w-4 h-4 text-pink-400 flex-shrink-0" />
+                  <div>
+                    <div className="font-medium text-white">Reels & Shorts (1080×1920)</div>
+                    <div className="text-[10px] text-zinc-400">9:16 с размытием фона и субтитрами</div>
+                  </div>
+                </button>
+
+                <button
+                  onClick={handleExportTelegram}
+                  className="w-full px-3 py-2 text-left hover:bg-zinc-800/80 flex items-center gap-2.5 text-zinc-200 transition"
+                >
+                  <Send className="w-4 h-4 text-sky-400 flex-shrink-0" />
+                  <div>
+                    <div className="font-medium text-white">Telegram (&lt; 50 МБ)</div>
+                    <div className="text-[10px] text-zinc-400">Сжатие до 48 МБ без потерь</div>
+                  </div>
+                </button>
+
+                <button
+                  onClick={handleExportAudioOnly}
+                  className="w-full px-3 py-2 text-left hover:bg-zinc-800/80 flex items-center gap-2.5 text-zinc-200 transition"
+                >
+                  <Music className="w-4 h-4 text-emerald-400 flex-shrink-0" />
+                  <div>
+                    <div className="font-medium text-white">Чистый звук (MP3 320k)</div>
+                    <div className="text-[10px] text-zinc-400">Голос без пауз в высоком качестве</div>
+                  </div>
+                </button>
+
                 <button
                   onClick={handleExportMP4}
                   className="w-full px-3 py-2 text-left hover:bg-zinc-800/80 flex items-center gap-2.5 text-zinc-200 transition"
                 >
-                  <Zap className="w-4 h-4 text-emerald-400 flex-shrink-0" />
+                  <Zap className="w-4 h-4 text-amber-400 flex-shrink-0" />
                   <div>
-                    <div className="font-medium text-white">Видео MP4</div>
-                    <div className="text-[10px] text-zinc-400">Монтаж с субтитрами</div>
+                    <div className="font-medium text-zinc-200">Обычный MP4</div>
+                    <div className="text-[10px] text-zinc-400">Текущие настройки монтажа</div>
                   </div>
                 </button>
 
@@ -914,10 +1240,10 @@ export default function App() {
                   onClick={handleExportSRT}
                   className="w-full px-3 py-2 text-left hover:bg-zinc-800/80 flex items-center gap-2.5 text-zinc-200 transition"
                 >
-                  <FileText className="w-4 h-4 text-amber-400 flex-shrink-0" />
+                  <FileText className="w-4 h-4 text-zinc-400 flex-shrink-0" />
                   <div>
                     <div className="font-medium">Субтитры SRT</div>
-                    <div className="text-[10px] text-zinc-400">Таймкоды для плееров</div>
+                    <div className="text-[10px] text-zinc-400">Таймкоды для внешних плееров</div>
                   </div>
                 </button>
 
@@ -925,10 +1251,10 @@ export default function App() {
                   onClick={handleExportEDL}
                   className="w-full px-3 py-2 text-left hover:bg-zinc-800/80 flex items-center gap-2.5 text-zinc-200 transition"
                 >
-                  <Clapperboard className="w-4 h-4 text-sky-400 flex-shrink-0" />
+                  <Clapperboard className="w-4 h-4 text-zinc-400 flex-shrink-0" />
                   <div>
                     <div className="font-medium">Таймлайн EDL</div>
-                    <div className="text-[10px] text-zinc-400">Premiere Pro и DaVinci</div>
+                    <div className="text-[10px] text-zinc-400">Premiere Pro и DaVinci Resolve</div>
                   </div>
                 </button>
               </div>
@@ -944,26 +1270,108 @@ export default function App() {
         {/* LEFT PANE: Video Player */}
         <section className="w-[50%] lg:w-[48%] border-r border-zinc-800/80 bg-zinc-950 flex flex-col justify-between p-4">
           
+          {/* Top Player Toolbar: Framing Mode & Visual Color Preset */}
+          <div className="flex items-center justify-between mb-2 px-1 text-xs flex-shrink-0">
+            {/* Framing mode toggle */}
+            <div className="flex items-center gap-1 bg-zinc-900/80 p-0.5 rounded-md border border-zinc-800">
+              <button
+                onClick={() => setFramingMode('original')}
+                className={`px-2 py-0.5 rounded text-[11px] font-medium transition flex items-center gap-1 ${
+                  framingMode === 'original'
+                    ? 'bg-zinc-800 text-zinc-100 shadow-sm'
+                    : 'text-zinc-500 hover:text-zinc-300'
+                }`}
+                title="Оригинальный формат кадра"
+              >
+                <Monitor className="w-3 h-3" />
+                <span>Оригинал</span>
+              </button>
+              <button
+                onClick={() => setFramingMode('blur_9_16')}
+                className={`px-2 py-0.5 rounded text-[11px] font-medium transition flex items-center gap-1 ${
+                  framingMode === 'blur_9_16'
+                    ? 'bg-indigo-950/80 text-indigo-300 border border-indigo-800/60 shadow-sm'
+                    : 'text-zinc-500 hover:text-zinc-300'
+                }`}
+                title="9:16 с размытием фона для Reels/Shorts"
+              >
+                <Smartphone className="w-3 h-3" />
+                <span>9:16 размытие</span>
+              </button>
+            </div>
+
+            {/* Visual Color Presets */}
+            <div className="flex items-center gap-1 bg-zinc-900/80 p-0.5 rounded-md border border-zinc-800">
+              <Palette className="w-3 h-3 text-zinc-500 ml-1.5 mr-0.5" />
+              {[
+                { id: 'none' as const, label: 'Ориг' },
+                { id: 'anime_punch' as const, label: 'Anime' },
+                { id: 'cinematic' as const, label: 'Кино' },
+                { id: 'crisp' as const, label: 'Чёткость' },
+              ].map((cp) => (
+                <button
+                  key={cp.id}
+                  onClick={() => setColorPreset(cp.id)}
+                  className={`px-1.5 py-0.5 rounded text-[10px] font-medium transition ${
+                    colorPreset === cp.id
+                      ? 'bg-zinc-800 text-zinc-100 font-semibold'
+                      : 'text-zinc-500 hover:text-zinc-300'
+                  }`}
+                >
+                  {cp.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
           {/* Framed Video Container */}
           <div className="relative flex-1 flex items-center justify-center min-h-0">
-            <div className="relative aspect-[9/16] h-full max-h-[520px] bg-black rounded-lg border border-zinc-800/80 overflow-hidden shadow-2xl flex flex-col justify-between select-none">
+            <div className={`relative ${framingMode === 'blur_9_16' ? 'aspect-[9/16]' : 'max-w-full'} h-full max-h-[520px] bg-black rounded-lg border border-zinc-800/80 overflow-hidden shadow-2xl flex items-center justify-center select-none`}>
               
               {videoSrc ? (
-                <video
-                  ref={videoRef}
-                  src={videoSrc}
-                  className="w-full h-full object-cover"
-                  playsInline
-                  onLoadedMetadata={(e) => {
-                    const d = e.currentTarget.duration
-                    if (d && !isNaN(d) && d > 0) {
-                      setTotalDuration(d)
-                    }
-                  }}
-                  onTimeUpdate={handleTimeUpdate}
-                  onPlay={() => setIsPlaying(true)}
-                  onPause={() => setIsPlaying(false)}
-                />
+                <>
+                  {/* Blurred background video when 9:16 blur mode is active */}
+                  {framingMode === 'blur_9_16' && (
+                    <video
+                      ref={bgVideoRef}
+                      src={videoSrc}
+                      muted
+                      playsInline
+                      className="absolute inset-0 w-full h-full object-cover filter blur-2xl scale-125 opacity-70 pointer-events-none"
+                      style={{ filter: `blur(20px) ${getColorFilterStyle(colorPreset)}` }}
+                    />
+                  )}
+
+                  <video
+                    ref={videoRef}
+                    src={videoSrc}
+                    className={`max-h-full max-w-full ${
+                      framingMode === 'blur_9_16' ? 'w-full h-full object-contain relative z-10' : 'object-contain'
+                    }`}
+                    style={{ filter: getColorFilterStyle(colorPreset) }}
+                    playsInline
+                    onLoadedMetadata={(e) => {
+                      const d = e.currentTarget.duration
+                      if (d && !isNaN(d) && d > 0) {
+                        setTotalDuration(d)
+                      }
+                    }}
+                    onTimeUpdate={handleTimeUpdate}
+                    onPlay={() => {
+                      setIsPlaying(true)
+                      bgVideoRef.current?.play().catch(() => {})
+                    }}
+                    onPause={() => {
+                      setIsPlaying(false)
+                      bgVideoRef.current?.pause()
+                    }}
+                    onSeeked={() => {
+                      if (bgVideoRef.current && videoRef.current) {
+                        bgVideoRef.current.currentTime = videoRef.current.currentTime
+                      }
+                    }}
+                  />
+                </>
               ) : (
                 <div
                   onClick={handleOpenFile}
@@ -1189,7 +1597,86 @@ export default function App() {
               {/* Body Controls */}
               <div className="space-y-4 text-xs">
                 
-                {/* 1. Subtitle Style Preset */}
+                {/* 1. Framing Mode */}
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <label className="font-medium text-zinc-200 flex items-center gap-1.5">
+                      <Smartphone className="w-3.5 h-3.5 text-indigo-400" />
+                      <span>Формат кадра</span>
+                    </label>
+                    <span className="font-mono text-zinc-400">
+                      {framingMode === 'blur_9_16' ? '9:16 с размытием фона' : 'Оригинал'}
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      onClick={() => setFramingMode('original')}
+                      className={`p-2 rounded border text-left transition ${
+                        framingMode === 'original'
+                          ? 'bg-zinc-100 text-zinc-950 border-white'
+                          : 'bg-zinc-950/60 text-zinc-400 border-zinc-800 hover:text-zinc-200'
+                      }`}
+                    >
+                      <div className="font-semibold text-[11px]">Оригинальный формат</div>
+                      <div className={`text-[10px] ${framingMode === 'original' ? 'text-zinc-700' : 'text-zinc-500'}`}>
+                        Без изменения соотношения сторон
+                      </div>
+                    </button>
+                    <button
+                      onClick={() => setFramingMode('blur_9_16')}
+                      className={`p-2 rounded border text-left transition ${
+                        framingMode === 'blur_9_16'
+                          ? 'bg-zinc-100 text-zinc-950 border-white'
+                          : 'bg-zinc-950/60 text-zinc-400 border-zinc-800 hover:text-zinc-200'
+                      }`}
+                    >
+                      <div className="font-semibold text-[11px]">9:16 с размытием фона</div>
+                      <div className={`text-[10px] ${framingMode === 'blur_9_16' ? 'text-zinc-700' : 'text-zinc-500'}`}>
+                        Идеально для Reels, Shorts и TikTok
+                      </div>
+                    </button>
+                  </div>
+                </div>
+
+                <div className="h-px bg-zinc-800 my-2" />
+
+                {/* 2. Visual Color Preset */}
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <label className="font-medium text-zinc-200 flex items-center gap-1.5">
+                      <Palette className="w-3.5 h-3.5 text-purple-400" />
+                      <span>Цветовой фильтр</span>
+                    </label>
+                    <span className="font-mono text-zinc-400 uppercase">{colorPreset}</span>
+                  </div>
+                  <div className="grid grid-cols-4 gap-2">
+                    {[
+                      { id: 'none' as const, title: 'Оригинал', desc: 'Без фильтра' },
+                      { id: 'anime_punch' as const, title: 'Anime Punch', desc: 'Сочные цвета' },
+                      { id: 'cinematic' as const, title: 'Кино', desc: 'Контраст' },
+                      { id: 'crisp' as const, title: 'Чёткость', desc: 'Для экранов' },
+                    ].map((cp) => (
+                      <button
+                        key={cp.id}
+                        onClick={() => setColorPreset(cp.id)}
+                        className={`p-2 rounded border text-left transition ${
+                          colorPreset === cp.id
+                            ? 'bg-zinc-100 text-zinc-950 border-white'
+                            : 'bg-zinc-950/60 text-zinc-400 border-zinc-800 hover:text-zinc-200'
+                        }`}
+                      >
+                        <div className="font-semibold text-[11px]">{cp.title}</div>
+                        <div className={`text-[10px] ${colorPreset === cp.id ? 'text-zinc-700' : 'text-zinc-500'}`}>
+                          {cp.desc}
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="h-px bg-zinc-800 my-2" />
+
+                {/* 3. Subtitle Style Preset */}
                 <div className="space-y-1.5">
                   <div className="flex items-center justify-between">
                     <label className="font-medium text-zinc-200 flex items-center gap-1.5">
@@ -1456,6 +1943,280 @@ export default function App() {
                 >
                   Готово
                 </button>
+              </div>
+
+            </div>
+          </div>
+        )}
+
+        {/* SMART COVER / POSTER GENERATOR MODAL (Фича 8) */}
+        {isCoverModalOpen && (
+          <div className="absolute inset-0 bg-black/80 backdrop-blur-md z-40 flex items-center justify-center p-4">
+            <div className="w-full max-w-4xl bg-zinc-900 border border-zinc-800 rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[92vh] animate-in fade-in duration-150">
+              
+              {/* Modal Header */}
+              <div className="h-12 px-5 border-b border-zinc-800 flex items-center justify-between flex-shrink-0 bg-zinc-900/80">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-7 h-7 rounded bg-indigo-950/80 border border-indigo-800/80 flex items-center justify-center text-indigo-300">
+                    <ImageIcon className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <h2 className="text-sm font-semibold text-zinc-100">Генератор обложки для Reels и Shorts</h2>
+                    <p className="text-[11px] text-zinc-400">Выберите яркий кадр и добавьте цепляющий заголовок</p>
+                  </div>
+                </div>
+                <button
+                  onClick={() => setIsCoverModalOpen(false)}
+                  className="w-7 h-7 rounded hover:bg-zinc-800 text-zinc-400 hover:text-white flex items-center justify-center transition"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              {/* Modal Body */}
+              <div className="flex-1 overflow-y-auto p-6 grid grid-cols-1 md:grid-cols-12 gap-6 items-start">
+                
+                {/* Left Column: 9:16 Live Poster Preview */}
+                <div className="md:col-span-5 flex flex-col items-center">
+                  <div className="text-xs font-medium text-zinc-400 mb-2 flex items-center justify-between w-full max-w-[260px]">
+                    <span>Предпросмотр 9:16</span>
+                    <span className="font-mono text-zinc-500">{formatTime(coverTime)}</span>
+                  </div>
+
+                  <div className="relative aspect-[9/16] w-full max-w-[260px] bg-black rounded-xl border border-zinc-700/80 overflow-hidden shadow-2xl flex flex-col justify-between select-none">
+                    {videoSrc ? (
+                      <>
+                        {coverFraming === 'blur_9_16' && (
+                          <video
+                            ref={coverBgRef}
+                            src={videoSrc}
+                            muted
+                            playsInline
+                            className="absolute inset-0 w-full h-full object-cover filter blur-2xl scale-125 opacity-75 pointer-events-none"
+                            style={{ filter: `blur(20px) ${getColorFilterStyle(coverColor)}` }}
+                          />
+                        )}
+                        <video
+                          ref={coverVideoRef}
+                          src={videoSrc}
+                          muted
+                          playsInline
+                          className={`w-full h-full object-contain ${coverFraming === 'blur_9_16' ? 'relative z-10' : ''}`}
+                          style={{ filter: getColorFilterStyle(coverColor) }}
+                        />
+                      </>
+                    ) : (
+                      <div className="absolute inset-0 flex items-center justify-center text-zinc-500 text-xs">
+                        Нет видео
+                      </div>
+                    )}
+
+                    {/* Styled Title Overlay */}
+                    {coverTitleStyle !== 'none' && coverTitle.trim() && (
+                      <div className="absolute inset-x-3 bottom-10 z-20 text-center">
+                        {coverTitleStyle === 'hormozi' ? (
+                          <div className="inline-block px-3 py-2 rounded-xl bg-black/85 border border-amber-400/50 shadow-2xl drop-shadow-[0_4px_12px_rgba(0,0,0,1)] max-w-[94%]">
+                            <span className="text-amber-300 font-black text-sm uppercase tracking-wider drop-shadow-[0_2px_8px_rgba(0,0,0,1)] break-words leading-tight">
+                              {coverTitle}
+                            </span>
+                          </div>
+                        ) : coverTitleStyle === 'neon' ? (
+                          <div className="inline-block px-3 py-2 rounded-xl bg-black/85 border border-cyan-400/60 shadow-[0_0_20px_rgba(6,182,212,0.45)] max-w-[94%]">
+                            <span className="text-cyan-300 font-extrabold text-sm uppercase tracking-wider drop-shadow-[0_0_12px_rgba(34,211,238,0.95)] break-words leading-tight">
+                              {coverTitle}
+                            </span>
+                          </div>
+                        ) : (
+                          <div className="inline-block px-3 py-1.5 rounded-lg bg-black/60 backdrop-blur-sm shadow-xl max-w-[94%]">
+                            <span className="text-white font-bold text-sm drop-shadow-[0_2px_4px_rgba(0,0,0,0.9)] break-words leading-tight">
+                              {coverTitle}
+                            </span>
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Timecode Badge */}
+                    <div className="absolute top-2.5 right-2.5 z-20">
+                      <span className="text-[10px] font-mono font-medium px-1.5 py-0.5 rounded bg-black/70 text-zinc-400 backdrop-blur-sm">
+                        {formatTime(coverTime)}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Right Column: Controls */}
+                <div className="md:col-span-7 space-y-4 text-xs">
+                  
+                  {/* 1. Keyframe Scrubber */}
+                  <div className="space-y-2 bg-zinc-950/60 p-3.5 rounded-xl border border-zinc-800">
+                    <div className="flex items-center justify-between">
+                      <label className="font-semibold text-zinc-200">Выбор кадра для обложки</label>
+                      <span className="font-mono text-indigo-400 font-medium">
+                        {formatTime(coverTime)} / {formatTime(totalDuration)}
+                      </span>
+                    </div>
+
+                    <input
+                      type="range"
+                      min={0}
+                      max={totalDuration || 1}
+                      step={0.1}
+                      value={coverTime}
+                      onChange={(e) => updateCoverTime(parseFloat(e.target.value))}
+                      className="w-full accent-indigo-500 bg-zinc-800 h-1.5 rounded cursor-pointer"
+                    />
+
+                    {/* Quick speech phrase badges */}
+                    {sampledCoverPhrases.length > 0 && (
+                      <div className="pt-1 space-y-1.5">
+                        <div className="text-[11px] text-zinc-400">Быстрый переход по фразам:</div>
+                        <div className="flex flex-wrap gap-1.5 max-h-28 overflow-y-auto pr-1">
+                          {sampledCoverPhrases.map((p) => {
+                            const isSelected = Math.abs(coverTime - p.data.startTime) < 0.8
+                            return (
+                              <button
+                                key={p.data.id}
+                                onClick={() => {
+                                  updateCoverTime(p.data.startTime)
+                                  setCoverTitle(p.data.text)
+                                }}
+                                className={`px-2 py-1 rounded text-[10px] font-mono border transition text-left truncate max-w-full ${
+                                  isSelected
+                                    ? 'bg-indigo-950/90 text-indigo-300 border-indigo-700 shadow-sm'
+                                    : 'bg-zinc-900/60 text-zinc-400 border-zinc-800 hover:text-zinc-200'
+                                }`}
+                              >
+                                <span className="text-zinc-500 mr-1">{formatTime(p.data.startTime)}</span>
+                                <span>{p.data.text.slice(0, 30)}{p.data.text.length > 30 ? '...' : ''}</span>
+                              </button>
+                            )
+                          })}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* 2. Title Text Input */}
+                  <div className="space-y-1.5 bg-zinc-950/60 p-3.5 rounded-xl border border-zinc-800">
+                    <div className="flex items-center justify-between">
+                      <label className="font-semibold text-zinc-200">Текст на обложке</label>
+                      <button
+                        onClick={() => {
+                          const match = phraseList.find((p) => coverTime >= p.data.startTime && coverTime <= p.data.endTime + 0.4)
+                          if (match) setCoverTitle(match.data.text)
+                        }}
+                        className="text-[11px] text-amber-400 hover:text-amber-300 transition"
+                      >
+                        ✨ Взять фразу из кадра
+                      </button>
+                    </div>
+                    <input
+                      type="text"
+                      value={coverTitle}
+                      onChange={(e) => setCoverTitle(e.target.value)}
+                      placeholder="Введите цепляющий заголовок для Reels..."
+                      className="w-full h-8 px-2.5 rounded bg-zinc-900 border border-zinc-700 text-xs text-zinc-200 placeholder-zinc-500 focus:outline-none focus:border-indigo-500"
+                    />
+                  </div>
+
+                  {/* 3. Title Style Preset */}
+                  <div className="space-y-1.5 bg-zinc-950/60 p-3.5 rounded-xl border border-zinc-800">
+                    <label className="font-semibold text-zinc-200">Стиль заголовка</label>
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                      {[
+                        { id: 'hormozi' as const, title: 'Hormozi', desc: 'Золото + обводка' },
+                        { id: 'neon' as const, title: 'Неон', desc: 'Свечение' },
+                        { id: 'clean' as const, title: 'Классика', desc: 'Белый с тенью' },
+                        { id: 'none' as const, title: 'Без текста', desc: 'Чистый кадр' },
+                      ].map((st) => (
+                        <button
+                          key={st.id}
+                          onClick={() => setCoverTitleStyle(st.id)}
+                          className={`p-2 rounded border text-left transition ${
+                            coverTitleStyle === st.id
+                              ? 'bg-zinc-100 text-zinc-950 border-white'
+                              : 'bg-zinc-900/60 text-zinc-400 border-zinc-800 hover:text-zinc-200'
+                          }`}
+                        >
+                          <div className="font-semibold text-[11px]">{st.title}</div>
+                          <div className={`text-[10px] ${coverTitleStyle === st.id ? 'text-zinc-700' : 'text-zinc-500'}`}>
+                            {st.desc}
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* 4. Framing & Color Presets for Cover */}
+                  <div className="grid grid-cols-2 gap-3">
+                    {/* Framing */}
+                    <div className="space-y-1.5 bg-zinc-950/60 p-3 rounded-xl border border-zinc-800">
+                      <label className="text-[11px] font-semibold text-zinc-300">Формат кадра</label>
+                      <div className="grid grid-cols-2 gap-1.5">
+                        <button
+                          onClick={() => setCoverFraming('blur_9_16')}
+                          className={`h-7 rounded border text-[10px] font-medium transition ${
+                            coverFraming === 'blur_9_16'
+                              ? 'bg-zinc-100 text-zinc-950 border-white'
+                              : 'bg-zinc-900/60 text-zinc-400 border-zinc-800 hover:text-zinc-200'
+                          }`}
+                        >
+                          9:16 размытие
+                        </button>
+                        <button
+                          onClick={() => setCoverFraming('original')}
+                          className={`h-7 rounded border text-[10px] font-medium transition ${
+                            coverFraming === 'original'
+                              ? 'bg-zinc-100 text-zinc-950 border-white'
+                              : 'bg-zinc-900/60 text-zinc-400 border-zinc-800 hover:text-zinc-200'
+                          }`}
+                        >
+                          Оригинал
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Color */}
+                    <div className="space-y-1.5 bg-zinc-950/60 p-3 rounded-xl border border-zinc-800">
+                      <label className="text-[11px] font-semibold text-zinc-300">Цвет</label>
+                      <div className="grid grid-cols-4 gap-1">
+                        {[
+                          { id: 'none' as const, label: 'Ориг' },
+                          { id: 'anime_punch' as const, label: 'Anime' },
+                          { id: 'cinematic' as const, label: 'Кино' },
+                          { id: 'crisp' as const, label: 'Чётко' },
+                        ].map((cp) => (
+                          <button
+                            key={cp.id}
+                            onClick={() => setCoverColor(cp.id)}
+                            className={`h-7 rounded border text-[10px] font-medium transition ${
+                              coverColor === cp.id
+                                ? 'bg-zinc-100 text-zinc-950 border-white'
+                                : 'bg-zinc-900/60 text-zinc-400 border-zinc-800 hover:text-zinc-200'
+                            }`}
+                          >
+                            {cp.label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* 5. Save Action */}
+                  <div className="pt-2">
+                    <button
+                      onClick={handleExportCover}
+                      disabled={isExporting}
+                      className="w-full h-9 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-medium text-xs flex items-center justify-center gap-2 transition shadow-lg shadow-indigo-950/40 disabled:opacity-50"
+                    >
+                      <Download className="w-4 h-4" />
+                      <span>{isExporting ? 'Сохранение обложки...' : 'Сохранить обложку (PNG / JPG)'}</span>
+                    </button>
+                  </div>
+
+                </div>
+
               </div>
 
             </div>

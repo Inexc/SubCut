@@ -183,6 +183,30 @@ pub fn format_srt_time(seconds: f64) -> String {
     format!("{:02}:{:02}:{:02},{:03}", h, m, sec, ms)
 }
 
+/// Helper to return FFmpeg video filter for visual color presets
+pub fn build_color_filter(preset: &str) -> Option<&'static str> {
+    match preset {
+        "anime_punch" => Some("eq=saturation=1.25:contrast=1.12,unsharp=5:5:0.8:5:5:0.0"),
+        "cinematic" => Some("eq=contrast=1.18:brightness=-0.03:saturation=0.95"),
+        "crisp" => Some("unsharp=7:7:1.2:7:7:0.0"),
+        _ => None,
+    }
+}
+
+/// Helper to calculate target video bitrate for Telegram Compact preset (< 50 MB)
+#[allow(dead_code)]
+pub fn calculate_telegram_video_bitrate(duration_sec: f64, max_megabytes: f64) -> u32 {
+    let dur = duration_sec.max(1.0);
+    let target_bytes = max_megabytes * 1024.0 * 1024.0;
+    let target_bits = target_bytes * 8.0;
+    let audio_kbps = 128.0;
+    let audio_bits = audio_kbps * 1000.0 * dur;
+    let video_bits = (target_bits - audio_bits).max(100_000.0);
+    let video_kbps = (video_bits / dur / 1000.0).round() as u32;
+    // Clamp between 300 kbps and 4500 kbps for safe quality and size
+    video_kbps.clamp(300, 4500)
+}
+
 /// Helper to format frame count as EDL timecode format (HH:MM:SS:FF)
 pub fn frames_to_edl_tc(total_frames: u64, fps: f64) -> String {
     let fps_val = if fps > 0.0 { fps.round() as u64 } else { 30 };
@@ -605,9 +629,233 @@ pub fn has_audio_stream(path: &str) -> bool {
     }
 }
 
+/// Generates an ASS subtitle file for video cover/poster with configurable styles
+pub fn generate_cover_ass(
+    title: &str,
+    style: &str,
+    output_path: &str,
+) -> Result<(), String> {
+    let mut ass = String::new();
+    ass.push_str("[Script Info]\n");
+    ass.push_str("ScriptType: v4.00+\n");
+    ass.push_str("PlayResX: 1080\n");
+    ass.push_str("PlayResY: 1920\n\n");
+
+    ass.push_str("[V4+ Styles]\n");
+    ass.push_str("Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n");
+
+    match style {
+        "neon" => {
+            // Neon style: Cyan primary (&H00FFFF00), black outline, glowing cyan shadow (&H80FFE000)
+            ass.push_str("Style: Default,Arial,66,&H00FFFF00,&H00FFFFFF,&H00000000,&H80FFE000,-1,0,0,0,100,100,0,0,1,5.0,5.0,2,60,60,380,1\n\n");
+        }
+        "clean" => {
+            // Clean white with drop shadow
+            ass.push_str("Style: Default,Arial,62,&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,4.0,2.5,2,60,60,380,1\n\n");
+        }
+        _ => {
+            // Hormozi Style: Bold, Amber Primary (&H0000C8FF), 6px Black Outline, Strong Shadow
+            ass.push_str("Style: Default,Arial,68,&H0000C8FF,&H00FFFFFF,&H00000000,&HA0000000,-1,0,0,0,100,100,0,0,1,6.0,4.0,2,60,60,380,1\n\n");
+        }
+    }
+
+    ass.push_str("[Events]\n");
+    ass.push_str("Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n");
+
+    let clean_text = if style == "clean" {
+        title.replace('\\', "/").replace('{', "(").replace('}', ")").replace('\n', "\\N")
+    } else {
+        title.to_uppercase().replace('\\', "/").replace('{', "(").replace('}', ")").replace('\n', "\\N")
+    };
+
+    ass.push_str(&format!(
+        "Dialogue: 0,0:00:00.00,0:00:10.00,Default,,0,0,0,,{}\n",
+        clean_text
+    ));
+
+    std::fs::write(output_path, ass.as_bytes())
+        .map_err(|e| format!("Не удалось создать файл субтитров для обложки: {}", e))?;
+
+    Ok(())
+}
+
+/// Extracts a high-res cover frame at specified timestamp with optional 9:16 background blur, color presets, and title overlay
+pub fn export_cover_image(
+    input_path: &str,
+    time: f64,
+    output_path: &str,
+    framing_mode: &str,
+    color_preset: &str,
+    title_text: Option<&str>,
+    title_style: Option<&str>,
+) -> Result<(), String> {
+    let mut filter_complex = String::new();
+    let mut cur_v = "[0:v]".to_string();
+
+    // 1. Framing mode (9:16 with background blur vs original)
+    if framing_mode == "blur_9_16" {
+        filter_complex.push_str(
+            "[0:v]split=2[bg_in][fg_in];\
+             [bg_in]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=25:5[bg];\
+             [fg_in]scale=1080:1920:force_original_aspect_ratio=decrease[fg];\
+             [bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1[framedv];"
+        );
+        cur_v = "[framedv]".to_string();
+    }
+
+    // 2. Color Preset
+    if let Some(color_f) = build_color_filter(color_preset) {
+        filter_complex.push_str(&format!("{}{}[colorv];", cur_v, color_f));
+        cur_v = "[colorv]".to_string();
+    }
+
+    // 3. Title overlay (if title given and style != "none")
+    let has_title = title_text.map_or(false, |t| !t.trim().is_empty())
+        && title_style.map_or(false, |s| s != "none");
+
+    let temp_file_name = format!(
+        "subcut_cover_{}_{}.ass",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0)
+    );
+    let temp_ass_path = std::env::temp_dir().join(temp_file_name);
+    let _ass_guard = TempFileGuard(&temp_ass_path);
+
+    if has_title {
+        let title = title_text.unwrap().trim();
+        let style = title_style.unwrap_or("hormozi");
+        let temp_ass_str = temp_ass_path.to_string_lossy().to_string();
+        generate_cover_ass(title, style, &temp_ass_str)?;
+
+        let escaped_ass = temp_ass_str
+            .replace('\\', "/")
+            .replace(':', "\\:")
+            .replace('\'', "'\\''");
+        filter_complex.push_str(&format!("{}subtitles='{}'[outv]", cur_v, escaped_ass));
+    } else if !filter_complex.is_empty() {
+        filter_complex.push_str(&format!("{}null[outv]", cur_v));
+    }
+
+    let mut args = vec![
+        "-y".to_string(),
+        "-hide_banner".to_string(),
+        "-ss".to_string(),
+        format!("{:.3}", time.max(0.0)),
+        "-i".to_string(),
+        input_path.to_string(),
+    ];
+
+    if !filter_complex.is_empty() {
+        args.extend(vec![
+            "-filter_complex".to_string(),
+            filter_complex,
+            "-map".to_string(),
+            "[outv]".to_string(),
+        ]);
+    }
+
+    args.extend(vec![
+        "-vframes".to_string(),
+        "1".to_string(),
+        "-update".to_string(),
+        "1".to_string(),
+        "-q:v".to_string(),
+        "2".to_string(),
+        output_path.to_string(),
+    ]);
+
+    let output = new_command("ffmpeg")
+        .args(&args)
+        .output()
+        .map_err(|e| format!("Ошибка запуска FFmpeg: {}", e))?;
+
+    if !output.status.success() {
+        let err = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("FFmpeg завершился с ошибкой: {}", err));
+    }
+
+    Ok(())
+}
+
+/// Exports audio-only trimmed track (MP3 320 kbps) without pauses
+pub fn export_audio_only(
+    input_path: &str,
+    cut_intervals: &[(f64, f64)],
+    total_duration: f64,
+    output_path: &str,
+    bitrate_kbps: u32,
+) -> Result<(), String> {
+    if !has_audio_stream(input_path) {
+        return Err("В исходном видеофайле нет аудиодорожки для экспорта".into());
+    }
+
+    let keep_intervals = calculate_keep_intervals(cut_intervals, total_duration);
+    if keep_intervals.is_empty() {
+        return Err("Все фрагменты аудио вырезаны".into());
+    }
+
+    let mut filter_complex = String::new();
+    let mut concat_inputs = String::new();
+
+    for (i, &(start, end)) in keep_intervals.iter().enumerate() {
+        let dur = end - start;
+        let fade_len = (dur * 0.10).min(0.025);
+        if fade_len >= 0.005 {
+            filter_complex.push_str(&format!(
+                "[0:a]atrim=start={:.3}:end={:.3},asetpts=PTS-STARTPTS,afade=t=in:st=0:d={:.3},afade=t=out:st={:.3}:d={:.3}[a{}];",
+                start, end, fade_len, (dur - fade_len).max(0.0), fade_len, i
+            ));
+        } else {
+            filter_complex.push_str(&format!(
+                "[0:a]atrim=start={:.3}:end={:.3},asetpts=PTS-STARTPTS[a{}];",
+                start, end, i
+            ));
+        }
+        concat_inputs.push_str(&format!("[a{}]", i));
+    }
+
+    filter_complex.push_str(&format!(
+        "{}concat=n={}:v=0:a=1[outa]",
+        concat_inputs,
+        keep_intervals.len()
+    ));
+
+    let args = vec![
+        "-y".to_string(),
+        "-hide_banner".to_string(),
+        "-i".to_string(),
+        input_path.to_string(),
+        "-filter_complex".to_string(),
+        filter_complex,
+        "-map".to_string(),
+        "[outa]".to_string(),
+        "-c:a".to_string(),
+        "libmp3lame".to_string(),
+        "-b:a".to_string(),
+        format!("{}k", bitrate_kbps.max(64)),
+        output_path.to_string(),
+    ];
+
+    let output = new_command("ffmpeg")
+        .args(&args)
+        .output()
+        .map_err(|e| format!("Ошибка запуска FFmpeg: {}", e))?;
+
+    if !output.status.success() {
+        let err = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("FFmpeg завершился с ошибкой: {}", err));
+    }
+
+    Ok(())
+}
+
 /// Cuts video without quality degradation using filter_complex concat
 /// Applies audio micro-crossfades and speech edge padding (0.12s out / 0.10s in)
-/// Supports GPU NVENC acceleration and styled subtitle burn-in.
+/// Supports GPU NVENC acceleration, vertical 9:16 background blur, visual color presets,
+/// target bitrate constraints, and styled subtitle burn-in.
 pub fn export_trimmed_video(
     input_path: &str,
     cut_intervals: &[(f64, f64)],
@@ -617,6 +865,9 @@ pub fn export_trimmed_video(
     subtitle_preset: &str,
     phrases: &[Phrase],
     hardware_accel: &str,
+    framing_mode: &str,
+    color_preset: &str,
+    target_bitrate_kbps: Option<u32>,
 ) -> Result<(), String> {
     let keep_intervals = calculate_keep_intervals(cut_intervals, total_duration);
 
@@ -678,28 +929,43 @@ pub fn export_trimmed_video(
     let audio_param = if has_audio { "a=1" } else { "a=0" };
     let audio_out_tag = if has_audio { "[outa]" } else { "" };
 
-    if should_burn {
+    filter_complex.push_str(&format!(
+        "{}concat=n={}:v=1:{}[v_concat]{};",
+        concat_inputs,
+        keep_intervals.len(),
+        audio_param,
+        audio_out_tag
+    ));
+
+    let mut cur_v = "[v_concat]".to_string();
+
+    // 1. Framing mode (9:16 blurred background)
+    if framing_mode == "blur_9_16" {
         filter_complex.push_str(&format!(
-            "{}concat=n={}:v=1:{}[concatv]{};",
-            concat_inputs,
-            keep_intervals.len(),
-            audio_param,
-            audio_out_tag
+            "{cur_v}split=2[bg_in][fg_in];\
+             [bg_in]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=25:5[bg];\
+             [fg_in]scale=1080:1920:force_original_aspect_ratio=decrease[fg];\
+             [bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1[v_framed];"
         ));
+        cur_v = "[v_framed]".to_string();
+    }
+
+    // 2. Visual Color preset
+    if let Some(color_f) = build_color_filter(color_preset) {
+        filter_complex.push_str(&format!("{cur_v}{color_f}[v_color];"));
+        cur_v = "[v_color]".to_string();
+    }
+
+    // 3. Subtitles burn-in
+    if should_burn {
         let temp_ass_str = temp_ass_path.to_string_lossy().to_string();
         let escaped_ass = temp_ass_str
             .replace('\\', "/")
             .replace(':', "\\:")
             .replace('\'', "'\\''");
-        filter_complex.push_str(&format!("[concatv]subtitles='{}'[outv]", escaped_ass));
+        filter_complex.push_str(&format!("{cur_v}subtitles='{}'[outv]", escaped_ass));
     } else {
-        filter_complex.push_str(&format!(
-            "{}concat=n={}:v=1:{}[outv]{}",
-            concat_inputs,
-            keep_intervals.len(),
-            audio_param,
-            audio_out_tag
-        ));
+        filter_complex.push_str(&format!("{cur_v}null[outv]"));
     }
 
     // Select Video Encoder (GPU NVENC vs CPU libx264)
@@ -720,34 +986,75 @@ pub fn export_trimmed_video(
         base_args.extend(vec!["-map".to_string(), "[outa]".to_string()]);
     }
 
-    if use_nvenc {
-        base_args.extend(vec![
-            "-c:v".to_string(),
-            "h264_nvenc".to_string(),
-            "-preset".to_string(),
-            "p4".to_string(),
-            "-cq".to_string(),
-            "20".to_string(),
-        ]);
+    if let Some(br) = target_bitrate_kbps {
+        let max_rate = (br as f64 * 1.25) as u32;
+        let buf_size = br * 2;
+        if use_nvenc {
+            base_args.extend(vec![
+                "-c:v".to_string(),
+                "h264_nvenc".to_string(),
+                "-preset".to_string(),
+                "p4".to_string(),
+                "-b:v".to_string(),
+                format!("{}k", br),
+                "-maxrate".to_string(),
+                format!("{}k", max_rate),
+                "-bufsize".to_string(),
+                format!("{}k", buf_size),
+            ]);
+        } else {
+            base_args.extend(vec![
+                "-c:v".to_string(),
+                "libx264".to_string(),
+                "-preset".to_string(),
+                "fast".to_string(),
+                "-b:v".to_string(),
+                format!("{}k", br),
+                "-maxrate".to_string(),
+                format!("{}k", max_rate),
+                "-bufsize".to_string(),
+                format!("{}k", buf_size),
+            ]);
+        }
+        if has_audio {
+            base_args.extend(vec![
+                "-c:a".to_string(),
+                "aac".to_string(),
+                "-b:a".to_string(),
+                "128k".to_string(),
+            ]);
+        }
     } else {
-        base_args.extend(vec![
-            "-c:v".to_string(),
-            "libx264".to_string(),
-            "-preset".to_string(),
-            "fast".to_string(),
-            "-crf".to_string(),
-            "18".to_string(),
-        ]);
+        if use_nvenc {
+            base_args.extend(vec![
+                "-c:v".to_string(),
+                "h264_nvenc".to_string(),
+                "-preset".to_string(),
+                "p4".to_string(),
+                "-cq".to_string(),
+                "20".to_string(),
+            ]);
+        } else {
+            base_args.extend(vec![
+                "-c:v".to_string(),
+                "libx264".to_string(),
+                "-preset".to_string(),
+                "fast".to_string(),
+                "-crf".to_string(),
+                "18".to_string(),
+            ]);
+        }
+        if has_audio {
+            base_args.extend(vec![
+                "-c:a".to_string(),
+                "aac".to_string(),
+                "-b:a".to_string(),
+                "192k".to_string(),
+            ]);
+        }
     }
 
-    if has_audio {
-        base_args.extend(vec![
-            "-c:a".to_string(),
-            "aac".to_string(),
-            "-b:a".to_string(),
-            "192k".to_string(),
-        ]);
-    } else {
+    if !has_audio {
         base_args.push("-an".to_string());
     }
 
@@ -770,22 +1077,48 @@ pub fn export_trimmed_video(
         if has_audio {
             cpu_args.extend(vec!["-map".to_string(), "[outa]".to_string()]);
         }
-        cpu_args.extend(vec![
-            "-c:v".to_string(),
-            "libx264".to_string(),
-            "-preset".to_string(),
-            "fast".to_string(),
-            "-crf".to_string(),
-            "18".to_string(),
-        ]);
-        if has_audio {
+        if let Some(br) = target_bitrate_kbps {
+            let max_rate = (br as f64 * 1.25) as u32;
+            let buf_size = br * 2;
             cpu_args.extend(vec![
-                "-c:a".to_string(),
-                "aac".to_string(),
-                "-b:a".to_string(),
-                "192k".to_string(),
+                "-c:v".to_string(),
+                "libx264".to_string(),
+                "-preset".to_string(),
+                "fast".to_string(),
+                "-b:v".to_string(),
+                format!("{}k", br),
+                "-maxrate".to_string(),
+                format!("{}k", max_rate),
+                "-bufsize".to_string(),
+                format!("{}k", buf_size),
             ]);
+            if has_audio {
+                cpu_args.extend(vec![
+                    "-c:a".to_string(),
+                    "aac".to_string(),
+                    "-b:a".to_string(),
+                    "128k".to_string(),
+                ]);
+            }
         } else {
+            cpu_args.extend(vec![
+                "-c:v".to_string(),
+                "libx264".to_string(),
+                "-preset".to_string(),
+                "fast".to_string(),
+                "-crf".to_string(),
+                "18".to_string(),
+            ]);
+            if has_audio {
+                cpu_args.extend(vec![
+                    "-c:a".to_string(),
+                    "aac".to_string(),
+                    "-b:a".to_string(),
+                    "192k".to_string(),
+                ]);
+            }
+        }
+        if !has_audio {
             cpu_args.push("-an".to_string());
         }
         cpu_args.push(output_path.to_string());
@@ -1058,5 +1391,82 @@ mod tests {
         assert!(content.contains(r"{\k"));
         assert!(content.contains("ПРИВЕТ"));
         assert!(content.contains("МИР"));
+    }
+
+    #[test]
+    fn test_calculate_telegram_video_bitrate() {
+        // 30 second video with 46 MB target -> should be clamped to 4500 max kbps
+        let br_30 = calculate_telegram_video_bitrate(30.0, 46.0);
+        assert_eq!(br_30, 4500);
+
+        // 180 second (3 min) video with 46 MB target:
+        // ~2015 kbps
+        let br_180 = calculate_telegram_video_bitrate(180.0, 46.0);
+        assert!(br_180 > 1950 && br_180 < 2100);
+
+        // 600 second (10 min) video with 46 MB target:
+        // ~515 kbps
+        let br_600 = calculate_telegram_video_bitrate(600.0, 46.0);
+        assert!(br_600 > 480 && br_600 < 550);
+
+        // Very long video -> should not drop below 300 kbps minimum
+        let br_long = calculate_telegram_video_bitrate(10000.0, 46.0);
+        assert_eq!(br_long, 300);
+    }
+
+    #[test]
+    fn test_build_color_filter() {
+        assert_eq!(
+            build_color_filter("anime_punch"),
+            Some("eq=saturation=1.25:contrast=1.12,unsharp=5:5:0.8:5:5:0.0")
+        );
+        assert_eq!(
+            build_color_filter("cinematic"),
+            Some("eq=contrast=1.18:brightness=-0.03:saturation=0.95")
+        );
+        assert_eq!(
+            build_color_filter("crisp"),
+            Some("unsharp=7:7:1.2:7:7:0.0")
+        );
+        assert_eq!(build_color_filter("none"), None);
+        assert_eq!(build_color_filter("unknown"), None);
+    }
+
+    #[test]
+    fn test_generate_cover_ass_styles() {
+        let temp_dir = std::env::temp_dir();
+
+        // Hormozi uppercase with amber highlight
+        let p_hormozi = temp_dir.join("test_cover_hormozi.ass");
+        generate_cover_ass("лучший момент", "hormozi", &p_hormozi.to_string_lossy()).unwrap();
+        let c_h = std::fs::read_to_string(&p_hormozi).unwrap();
+        let _ = std::fs::remove_file(&p_hormozi);
+        assert!(c_h.contains("ЛУЧШИЙ МОМЕНТ"));
+        assert!(c_h.contains("&H0000C8FF")); // Amber primary
+        assert!(c_h.contains("&HA0000000")); // Deep shadow
+
+        // Neon style with glowing cyan shadow
+        let p_neon = temp_dir.join("test_cover_neon.ass");
+        generate_cover_ass("неоновый заголовок", "neon", &p_neon.to_string_lossy()).unwrap();
+        let c_n = std::fs::read_to_string(&p_neon).unwrap();
+        let _ = std::fs::remove_file(&p_neon);
+        assert!(c_n.contains("НЕОНОВЫЙ ЗАГОЛОВОК"));
+        assert!(c_n.contains("&H00FFFF00")); // Cyan primary
+        assert!(c_n.contains("&H80FFE000")); // Glowing cyan shadow
+
+        // Clean style
+        let p_clean = temp_dir.join("test_cover_clean.ass");
+        generate_cover_ass("Чистый текст", "clean", &p_clean.to_string_lossy()).unwrap();
+        let c_c = std::fs::read_to_string(&p_clean).unwrap();
+        let _ = std::fs::remove_file(&p_clean);
+        assert!(c_c.contains("Чистый текст"));
+        assert!(c_c.contains("&H00FFFFFF"));
+    }
+
+    #[test]
+    fn test_export_audio_only_no_audio() {
+        let res = export_audio_only("non_existent_file.mp4", &[(0.0, 1.0)], 10.0, "out.mp3", 320);
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("нет аудиодорожки"));
     }
 }
