@@ -164,6 +164,7 @@ export default function App() {
   // Pro Features State (Feature 2 & Feature 4)
   const [silenceThreshold, setSilenceThreshold] = useState<number>(-30.0)
   const [minSilenceDuration, setMinSilenceDuration] = useState<number>(0.5)
+  const [pauseMode, setPauseMode] = useState<'smart' | 'volume'>('smart')
   const [whisperModel, setWhisperModel] = useState<string>('base')
   const [speechLanguage, setSpeechLanguage] = useState<string>('ru')
   const [burnSubtitles, setBurnSubtitles] = useState<boolean>(true)
@@ -191,6 +192,46 @@ export default function App() {
     return currentTime >= p.data.startTime && currentTime <= maxEnd
   })
   const activePhrase = activePhraseIndex >= 0 ? phraseList[activePhraseIndex] : null
+
+  // Calculate pause gaps directly from speech timestamps (Whisper AI VAD)
+  const calculateSpeechGaps = (
+    phrasesList: Phrase[],
+    videoDuration: number,
+    minDuration: number
+  ): SilenceGap[] => {
+    const gaps: SilenceGap[] = []
+    let lastEnd = 0.0
+    let idx = 1
+
+    const sorted = [...phrasesList].sort((a, b) => a.startTime - b.startTime)
+
+    for (const p of sorted) {
+      const gapDuration = p.startTime - lastEnd
+      if (gapDuration >= minDuration) {
+        gaps.push({
+          id: `silence-${idx++}`,
+          startTime: Number(lastEnd.toFixed(2)),
+          endTime: Number(p.startTime.toFixed(2)),
+          duration: Number(gapDuration.toFixed(2)),
+          isCut: true,
+        })
+      }
+      lastEnd = Math.max(lastEnd, p.endTime)
+    }
+
+    if (videoDuration - lastEnd >= minDuration) {
+      const endGap = videoDuration - lastEnd
+      gaps.push({
+        id: `silence-${idx++}`,
+        startTime: Number(lastEnd.toFixed(2)),
+        endTime: Number(videoDuration.toFixed(2)),
+        duration: Number(endGap.toFixed(2)),
+        isCut: true,
+      })
+    }
+
+    return gaps
+  }
 
   // Open Video File
   const handleOpenFile = async () => {
@@ -241,9 +282,17 @@ export default function App() {
       }
 
       // 5. Interleave phrases and silences chronologically
+      // If smart mode is enabled (or volume found 0 pauses due to loud BGM/anime), calculate pauses from speech gaps
+      let finalGaps = detectedGaps
+      if (pauseMode === 'smart' && phrases.length > 0) {
+        finalGaps = calculateSpeechGaps(phrases, dur, minSilenceDuration)
+      } else if (finalGaps.length === 0 && phrases.length > 0) {
+        finalGaps = calculateSpeechGaps(phrases, dur, minSilenceDuration)
+      }
+
       const allEvents: { time: number; item: ScriptItem }[] = []
 
-      detectedGaps.forEach((gap) => {
+      finalGaps.forEach((gap) => {
         allEvents.push({ time: gap.startTime, item: { type: 'silence', data: gap } })
       })
 
@@ -253,7 +302,7 @@ export default function App() {
         })
       } else {
         let cur = 0
-        detectedGaps.forEach((gap, idx) => {
+        finalGaps.forEach((gap, idx) => {
           if (gap.startTime > cur + 0.1) {
             allEvents.push({
               time: cur,
@@ -277,11 +326,11 @@ export default function App() {
             item: {
               type: 'phrase',
               data: {
-                id: `p-${detectedGaps.length + 1}`,
+                id: `p-${finalGaps.length + 1}`,
                 speaker: 'Спикер',
                 startTime: cur,
                 endTime: dur,
-                text: `Речь спикера (фрагмент ${detectedGaps.length + 1})`,
+                text: `Речь спикера (фрагмент ${finalGaps.length + 1})`,
               },
             },
           })
@@ -306,20 +355,30 @@ export default function App() {
     if (!filePath) return
     try {
       setIsAnalyzing(true)
-      setAnalyzingStatus('Пересчёт пауз с новыми порогами...')
-      const detectedGaps = await invoke<SilenceGap[]>('detect_silence_cmd', {
-        path: filePath,
-        thresholdDb: silenceThreshold,
-        minDuration: minSilenceDuration,
-      })
+      setAnalyzingStatus('Пересчёт пауз...')
 
-      // Keep user edited phrases
       const currentPhrases = items
         .filter((i): i is { type: 'phrase'; data: Phrase } => i.type === 'phrase')
         .map((p) => p.data)
 
+      let finalGaps: SilenceGap[] = []
+      if (pauseMode === 'smart' && currentPhrases.length > 0) {
+        finalGaps = calculateSpeechGaps(currentPhrases, totalDuration, minSilenceDuration)
+      } else {
+        const detectedGaps = await invoke<SilenceGap[]>('detect_silence_cmd', {
+          path: filePath,
+          thresholdDb: silenceThreshold,
+          minDuration: minSilenceDuration,
+        })
+        if (detectedGaps.length === 0 && currentPhrases.length > 0) {
+          finalGaps = calculateSpeechGaps(currentPhrases, totalDuration, minSilenceDuration)
+        } else {
+          finalGaps = detectedGaps
+        }
+      }
+
       const allEvents: { time: number; item: ScriptItem }[] = []
-      detectedGaps.forEach((gap) => {
+      finalGaps.forEach((gap) => {
         allEvents.push({ time: gap.startTime, item: { type: 'silence', data: gap } })
       })
 
@@ -327,41 +386,6 @@ export default function App() {
         currentPhrases.forEach((phrase) => {
           allEvents.push({ time: phrase.startTime, item: { type: 'phrase', data: phrase } })
         })
-      } else {
-        let cur = 0
-        detectedGaps.forEach((gap, idx) => {
-          if (gap.startTime > cur + 0.1) {
-            allEvents.push({
-              time: cur,
-              item: {
-                type: 'phrase',
-                data: {
-                  id: `p-${idx + 1}`,
-                  speaker: 'Спикер',
-                  startTime: cur,
-                  endTime: gap.startTime,
-                  text: `Речь спикера (фрагмент ${idx + 1})`,
-                },
-              },
-            })
-          }
-          cur = gap.endTime
-        })
-        if (cur < totalDuration - 0.1) {
-          allEvents.push({
-            time: cur,
-            item: {
-              type: 'phrase',
-              data: {
-                id: `p-${detectedGaps.length + 1}`,
-                speaker: 'Спикер',
-                startTime: cur,
-                endTime: totalDuration,
-                text: `Речь спикера (фрагмент ${detectedGaps.length + 1})`,
-              },
-            },
-          })
-        }
       }
 
       allEvents.sort((a, b) => a.time - b.time)
@@ -388,13 +412,22 @@ export default function App() {
         language: speechLanguage,
       })
 
-      // Keep current silences
-      const currentSilences = items
-        .filter((i): i is { type: 'silence'; data: SilenceGap } => i.type === 'silence')
-        .map((s) => s.data)
+      let finalGaps: SilenceGap[] = []
+      if (pauseMode === 'smart' && phrases.length > 0) {
+        finalGaps = calculateSpeechGaps(phrases, totalDuration, minSilenceDuration)
+      } else {
+        const currentSilences = items
+          .filter((i): i is { type: 'silence'; data: SilenceGap } => i.type === 'silence')
+          .map((s) => s.data)
+        if (currentSilences.length === 0 && phrases.length > 0) {
+          finalGaps = calculateSpeechGaps(phrases, totalDuration, minSilenceDuration)
+        } else {
+          finalGaps = currentSilences
+        }
+      }
 
       const allEvents: { time: number; item: ScriptItem }[] = []
-      currentSilences.forEach((gap) => {
+      finalGaps.forEach((gap) => {
         allEvents.push({ time: gap.startTime, item: { type: 'silence', data: gap } })
       })
 
@@ -1171,38 +1204,74 @@ export default function App() {
 
                 <div className="h-px bg-zinc-800 my-2" />
 
-                {/* 3. Silence Threshold (dB) */}
+                {/* 3. Pause Detection Mode */}
                 <div className="space-y-1.5">
                   <div className="flex items-center justify-between">
-                    <label className="font-medium text-zinc-200">Порог шума тишины (dB)</label>
-                    <span className="font-mono text-zinc-400">{silenceThreshold} dB</span>
+                    <label className="font-medium text-zinc-200 flex items-center gap-1.5">
+                      <Scissors className="w-3.5 h-3.5 text-red-400" />
+                      <span>Режим поиска пауз</span>
+                    </label>
+                    <span className="font-mono text-zinc-400 text-xs">
+                      {pauseMode === 'smart' ? 'ИИ (по речи)' : 'FFmpeg (по громкости)'}
+                    </span>
                   </div>
-                  <div className="grid grid-cols-4 gap-2">
+                  <div className="grid grid-cols-2 gap-2">
                     {[
-                      { val: -25, label: '-25 dB (Шум)' },
-                      { val: -30, label: '-30 dB (Норма)' },
-                      { val: -35, label: '-35 dB (Тишина)' },
-                      { val: -40, label: '-40 dB (Студия)' },
+                      { val: 'smart', label: 'Умный ИИ (по речи)', desc: 'Ищет паузы между репликами даже при громкой музыке' },
+                      { val: 'volume', label: 'По громкости (FFmpeg)', desc: 'Ищет участки тише порога dB (для студийных записей)' },
                     ].map((opt) => (
                       <button
                         key={opt.val}
-                        onClick={() => setSilenceThreshold(opt.val)}
-                        className={`h-7 rounded border font-mono text-[11px] transition ${
-                          silenceThreshold === opt.val
-                            ? 'bg-zinc-100 text-zinc-950 border-white font-medium'
+                        onClick={() => setPauseMode(opt.val as 'smart' | 'volume')}
+                        className={`p-2.5 rounded border text-left transition ${
+                          pauseMode === opt.val
+                            ? 'bg-zinc-100 text-zinc-950 border-white'
                             : 'bg-zinc-950/60 text-zinc-400 border-zinc-800 hover:text-zinc-200'
                         }`}
                       >
-                        {opt.label}
+                        <div className="text-xs font-semibold">{opt.label}</div>
+                        <div className={`text-[10px] mt-0.5 leading-snug ${pauseMode === opt.val ? 'text-zinc-700' : 'text-zinc-500'}`}>
+                          {opt.desc}
+                        </div>
                       </button>
                     ))}
                   </div>
                 </div>
 
-                {/* 4. Minimum Silence Duration (seconds) */}
+                {/* 4. Silence Threshold (dB) - only for volume mode */}
+                {pauseMode === 'volume' && (
+                  <div className="space-y-1.5 animate-in fade-in duration-100">
+                    <div className="flex items-center justify-between">
+                      <label className="font-medium text-zinc-200">Порог шума тишины (dB)</label>
+                      <span className="font-mono text-zinc-400">{silenceThreshold} dB</span>
+                    </div>
+                    <div className="grid grid-cols-4 gap-2">
+                      {[
+                        { val: -22, label: '-22 dB (Музыка)' },
+                        { val: -25, label: '-25 dB (Шум)' },
+                        { val: -30, label: '-30 dB (Норма)' },
+                        { val: -35, label: '-35 dB (Студия)' },
+                      ].map((opt) => (
+                        <button
+                          key={opt.val}
+                          onClick={() => setSilenceThreshold(opt.val)}
+                          className={`h-7 rounded border font-mono text-[11px] transition ${
+                            silenceThreshold === opt.val
+                              ? 'bg-zinc-100 text-zinc-950 border-white font-medium'
+                              : 'bg-zinc-950/60 text-zinc-400 border-zinc-800 hover:text-zinc-200'
+                          }`}
+                        >
+                          {opt.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* 5. Minimum Silence Duration (seconds) */}
                 <div className="space-y-1.5">
                   <div className="flex items-center justify-between">
-                    <label className="font-medium text-zinc-200">Минимальная длина паузы</label>
+                    <label className="font-medium text-zinc-200">Минимальная длина паузы для вырезания</label>
                     <span className="font-mono text-zinc-400">{minSilenceDuration} с</span>
                   </div>
                   <div className="grid grid-cols-4 gap-2">
@@ -1227,17 +1296,6 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* Silence Threshold Audio Tip for BGM / Anime */}
-                <div className="text-[11px] text-zinc-400 bg-zinc-950/60 p-2.5 rounded border border-zinc-800/80 space-y-1">
-                  <div className="text-zinc-200 font-medium flex items-center gap-1.5">
-                    <SlidersHorizontal className="w-3.5 h-3.5 text-amber-400" />
-                    <span>Совет для видео с музыкой или шумом:</span>
-                  </div>
-                  <p className="text-zinc-400 text-[11px] leading-relaxed">
-                    Для обычных разговоров подходит <span className="text-zinc-200 font-mono">-30 dB</span>. Если в видео звучит фоновая музыка (как в аниме или играх), выберите <span className="text-amber-400 font-mono font-semibold">-22 dB</span> или <span className="text-amber-400 font-mono font-semibold">-25 dB</span> и нажмите «Пересчитать паузы».
-                  </p>
-                </div>
-
                 {/* Recalculate CTA */}
                 {filePath && (
                   <button
@@ -1249,7 +1307,7 @@ export default function App() {
                     className="w-full h-8 rounded bg-zinc-800 hover:bg-zinc-750 border border-zinc-700 text-zinc-200 flex items-center justify-center gap-2 font-medium transition text-xs"
                   >
                     <RefreshCw className={`w-3.5 h-3.5 ${isAnalyzing ? 'animate-spin' : ''}`} />
-                    <span>Пересчитать паузы тишины (FFmpeg)</span>
+                    <span>Пересчитать паузы ({pauseMode === 'smart' ? 'ИИ по речи' : 'FFmpeg dB'})</span>
                   </button>
                 )}
 
@@ -1466,7 +1524,7 @@ export default function App() {
             <span className="text-zinc-400">Стрелки ← / →: переход ±2с</span>
           </div>
           <div className="flex items-center gap-2">
-            <span>Порог: {silenceThreshold}dB</span>
+            <span>Паузы: {pauseMode === 'smart' ? 'ИИ (по речи)' : `FFmpeg (${silenceThreshold}dB)`}</span>
             <span>•</span>
             <span>Мин: {minSilenceDuration}с</span>
             <span>•</span>
