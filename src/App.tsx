@@ -58,16 +58,16 @@ const INITIAL_SCRIPT: ScriptItem[] = [
       speaker: 'Спикер',
       startTime: 0.0,
       endTime: 3.45,
-      text: 'Всем привет! Сегодня разберём, как быстро монтировать рилсы прямо по тексту.',
+      text: 'Привет! В этом видео покажем монтаж речи прямо по тексту.',
       words: [
-        { word: 'Всем', startTime: 0.0, endTime: 0.4 },
-        { word: 'привет!', startTime: 0.4, endTime: 0.8 },
-        { word: 'Сегодня', startTime: 0.9, endTime: 1.3 },
-        { word: 'разберём,', startTime: 1.3, endTime: 1.8 },
-        { word: 'как', startTime: 1.8, endTime: 2.1 },
-        { word: 'быстро', startTime: 2.1, endTime: 2.5 },
-        { word: 'монтировать', startTime: 2.5, endTime: 3.0 },
-        { word: 'рилсы.', startTime: 3.0, endTime: 3.45 },
+        { word: 'Привет!', startTime: 0.0, endTime: 0.5 },
+        { word: 'В', startTime: 0.5, endTime: 0.7 },
+        { word: 'этом', startTime: 0.7, endTime: 1.0 },
+        { word: 'видео', startTime: 1.0, endTime: 1.4 },
+        { word: 'покажем', startTime: 1.4, endTime: 1.9 },
+        { word: 'монтаж', startTime: 1.9, endTime: 2.4 },
+        { word: 'речи', startTime: 2.4, endTime: 2.8 },
+        { word: 'по тексту.', startTime: 2.8, endTime: 3.45 },
       ],
     },
   },
@@ -88,7 +88,7 @@ const INITIAL_SCRIPT: ScriptItem[] = [
       speaker: 'Спикер',
       startTime: 4.85,
       endTime: 8.6,
-      text: 'Обычно монтаж отнимает часы на поиск пауз и ручную нарезку дорожки.',
+      text: 'Не нужно вручную резать таймлайн и искать паузы между словами.',
     },
   },
   {
@@ -108,7 +108,7 @@ const INITIAL_SCRIPT: ScriptItem[] = [
       speaker: 'Спикер',
       startTime: 10.1,
       endTime: 14.3,
-      text: 'SubCut автоматически находит всю тишину и вырезает её в один клик.',
+      text: 'SubCut находит тишину и удаляет лишнее.',
     },
   },
   {
@@ -128,7 +128,7 @@ const INITIAL_SCRIPT: ScriptItem[] = [
       speaker: 'Спикер',
       startTime: 16.0,
       endTime: 20.4,
-      text: 'А динамические субтитры уже сгенерированы и готовы к публикации.',
+      text: 'Субтитры готовы — остаётся проверить результат.',
     },
   },
 ]
@@ -141,6 +141,7 @@ const DEFAULT_WAVEFORM = Array.from({ length: 120 }, (_, i) => {
 })
 
 function formatTime(seconds: number): string {
+  if (!seconds || isNaN(seconds) || seconds < 0) return '00:00.0'
   const mins = Math.floor(seconds / 60)
   const secs = Math.floor(seconds % 60)
   const ms = Math.floor((seconds % 1) * 10)
@@ -161,7 +162,7 @@ export default function App() {
   const [isExporting, setIsExporting] = useState<boolean>(false)
   const [searchQuery, setSearchQuery] = useState<string>('')
 
-  // Pro Features State (Feature 2 & Feature 4)
+  // Settings State
   const [silenceThreshold, setSilenceThreshold] = useState<number>(-30.0)
   const [minSilenceDuration, setMinSilenceDuration] = useState<number>(0.5)
   const [pauseMode, setPauseMode] = useState<'smart' | 'volume'>('smart')
@@ -184,7 +185,7 @@ export default function App() {
   const cutDuration = activeCuts.reduce((acc, s) => acc + s.data.duration, 0)
   const remainingDuration = Math.max(0, totalDuration - cutDuration)
 
-  // List of phrases for subtitle overlay (with buffer so words don't vanish on micro-pauses)
+  // Active phrase calculation
   const phraseList = items.filter((i): i is { type: 'phrase'; data: Phrase } => i.type === 'phrase')
   const activePhraseIndex = phraseList.findIndex((p, idx) => {
     const nextPhrase = phraseList[idx + 1]
@@ -193,7 +194,7 @@ export default function App() {
   })
   const activePhrase = activePhraseIndex >= 0 ? phraseList[activePhraseIndex] : null
 
-  // Calculate pause gaps directly from speech timestamps (Whisper AI VAD)
+  // Calculate pause gaps directly from speech timestamps
   const calculateSpeechGaps = (
     phrasesList: Phrase[],
     videoDuration: number,
@@ -213,7 +214,7 @@ export default function App() {
           startTime: Number(lastEnd.toFixed(2)),
           endTime: Number(p.startTime.toFixed(2)),
           duration: Number(gapDuration.toFixed(2)),
-          isCut: true,
+          isCut: false,
         })
       }
       lastEnd = Math.max(lastEnd, p.endTime)
@@ -226,7 +227,7 @@ export default function App() {
         startTime: Number(lastEnd.toFixed(2)),
         endTime: Number(videoDuration.toFixed(2)),
         duration: Number(endGap.toFixed(2)),
-        isCut: true,
+        isCut: false,
       })
     }
 
@@ -244,32 +245,46 @@ export default function App() {
       setVideoSrc(convertFileSrc(selected))
 
       // 1. Get real duration
-      setAnalyzingStatus('Анализ параметров видео...')
-      const dur = await invoke<number>('get_video_duration_cmd', { path: selected })
+      setAnalyzingStatus('Чтение видео...')
+      let dur = 0
+      try {
+        dur = await invoke<number>('get_video_duration_cmd', { path: selected })
+      } catch (err) {
+        console.warn('Duration probe warning:', err)
+      }
       if (dur && dur > 0) {
         setTotalDuration(dur)
       }
 
       // 2. Detect pauses via FFmpeg
-      setAnalyzingStatus('Поиск пауз и тишины...')
-      const detectedGaps = await invoke<SilenceGap[]>('detect_silence_cmd', {
-        path: selected,
-        thresholdDb: silenceThreshold,
-        minDuration: minSilenceDuration,
-      })
-
-      // 3. Extract real waveform peaks
-      setAnalyzingStatus('Построение звуковой дорожки...')
-      const peaks = await invoke<number[]>('extract_waveform_cmd', {
-        path: selected,
-        points: 140,
-      })
-      if (peaks && peaks.length > 0) {
-        setWaveform(peaks)
+      setAnalyzingStatus('Поиск пауз...')
+      let detectedGaps: SilenceGap[] = []
+      try {
+        detectedGaps = await invoke<SilenceGap[]>('detect_silence_cmd', {
+          path: selected,
+          thresholdDb: silenceThreshold,
+          minDuration: minSilenceDuration,
+        })
+      } catch (err) {
+        console.warn('Silence detect warning:', err)
       }
 
-      // 4. Transcribe speech using Whisper AI with word timestamps & selected language
-      setAnalyzingStatus('Распознавание речи через Whisper (пословные таймкоды)...')
+      // 3. Extract real waveform peaks
+      setAnalyzingStatus('Построение аудиоволны...')
+      try {
+        const peaks = await invoke<number[]>('extract_waveform_cmd', {
+          path: selected,
+          points: 140,
+        })
+        if (peaks && peaks.length > 0) {
+          setWaveform(peaks)
+        }
+      } catch (err) {
+        console.warn('Waveform extract warning:', err)
+      }
+
+      // 4. Transcribe speech using Whisper AI
+      setAnalyzingStatus('Распознавание речи...')
       let phrases: Phrase[] = []
       try {
         phrases = await invoke<Phrase[]>('transcribe_speech_cmd', {
@@ -278,16 +293,16 @@ export default function App() {
           language: speechLanguage,
         })
       } catch (wErr) {
-        console.warn('Whisper transcription error:', wErr)
+        console.warn('Whisper transcription warning:', wErr)
       }
 
-      // 5. Interleave phrases and silences chronologically
-      // If smart mode is enabled (or volume found 0 pauses due to loud BGM/anime), calculate pauses from speech gaps
+      const effectiveDuration = dur > 0 ? dur : totalDuration
+
       let finalGaps = detectedGaps
       if (pauseMode === 'smart' && phrases.length > 0) {
-        finalGaps = calculateSpeechGaps(phrases, dur, minSilenceDuration)
+        finalGaps = calculateSpeechGaps(phrases, effectiveDuration, minSilenceDuration)
       } else if (finalGaps.length === 0 && phrases.length > 0) {
-        finalGaps = calculateSpeechGaps(phrases, dur, minSilenceDuration)
+        finalGaps = calculateSpeechGaps(phrases, effectiveDuration, minSilenceDuration)
       }
 
       const allEvents: { time: number; item: ScriptItem }[] = []
@@ -313,14 +328,14 @@ export default function App() {
                   speaker: 'Спикер',
                   startTime: cur,
                   endTime: gap.startTime,
-                  text: `Речь спикера (фрагмент ${idx + 1})`,
+                  text: `Речь (${formatTime(cur)} — ${formatTime(gap.startTime)})`,
                 },
               },
             })
           }
           cur = gap.endTime
         })
-        if (cur < dur - 0.1) {
+        if (cur < effectiveDuration - 0.1) {
           allEvents.push({
             time: cur,
             item: {
@@ -329,8 +344,8 @@ export default function App() {
                 id: `p-${finalGaps.length + 1}`,
                 speaker: 'Спикер',
                 startTime: cur,
-                endTime: dur,
-                text: `Речь спикера (фрагмент ${finalGaps.length + 1})`,
+                endTime: effectiveDuration,
+                text: `Речь (${formatTime(cur)} — ${formatTime(effectiveDuration)})`,
               },
             },
           })
@@ -343,7 +358,7 @@ export default function App() {
       }
       seekTo(0)
     } catch (err) {
-      alert(`Ошибка анализа видео: ${err}`)
+      alert(`Ошибка открытия файла: ${err}`)
     } finally {
       setIsAnalyzing(false)
       setAnalyzingStatus('')
@@ -355,7 +370,7 @@ export default function App() {
     if (!filePath) return
     try {
       setIsAnalyzing(true)
-      setAnalyzingStatus('Пересчёт пауз...')
+      setAnalyzingStatus('Обновление пауз...')
 
       const currentPhrases = items
         .filter((i): i is { type: 'phrase'; data: Phrase } => i.type === 'phrase')
@@ -393,7 +408,7 @@ export default function App() {
         setItems(allEvents.map((e) => e.item))
       }
     } catch (err) {
-      alert(`Ошибка пересчета пауз: ${err}`)
+      alert(`Не удалось обновить паузы: ${err}`)
     } finally {
       setIsAnalyzing(false)
       setAnalyzingStatus('')
@@ -405,7 +420,7 @@ export default function App() {
     if (!filePath) return
     try {
       setIsAnalyzing(true)
-      setAnalyzingStatus('Распознавание речи через Whisper (пословные таймкоды)...')
+      setAnalyzingStatus('Распознавание речи...')
       const phrases = await invoke<Phrase[]>('transcribe_speech_cmd', {
         path: filePath,
         modelSize: whisperModel,
@@ -442,7 +457,7 @@ export default function App() {
         setItems(allEvents.map((e) => e.item))
       }
     } catch (err) {
-      alert(`Ошибка распознавания речи: ${err}`)
+      alert(`Не удалось распознать речь: ${err}`)
     } finally {
       setIsAnalyzing(false)
       setAnalyzingStatus('')
@@ -463,8 +478,10 @@ export default function App() {
 
   // Seek video
   const seekTo = (time: number) => {
-    const clamped = Math.max(0, Math.min(totalDuration, time))
+    const clamped = Math.max(0, Math.min(totalDuration || 0, time))
     setCurrentTime(clamped)
+    lastSkippedIdRef.current = null
+    isSkippingRef.current = false
     if (videoRef.current) {
       videoRef.current.currentTime = clamped
     }
@@ -476,18 +493,17 @@ export default function App() {
     const t = videoRef.current.currentTime
     setCurrentTime(t)
 
-    // Ignore while already seeking or jumping
     if (videoRef.current.seeking || isSkippingRef.current) return
 
     const PAD_OUT = 0.12 // 120ms natural voice decay tail
-    const PAD_IN = 0.08  // 80ms natural voice onset
+    const PAD_IN = 0.10  // 100ms natural voice onset
 
     const currentCut = items.find(
       (item): item is { type: 'silence'; data: SilenceGap } => {
         if (item.type !== 'silence' || !item.data.isCut) return false
-        const effStart = item.data.startTime + PAD_OUT
-        const effEnd = item.data.endTime - PAD_IN
-        return effEnd > effStart + 0.05 && t >= effStart && t < effEnd
+        const effStart = item.data.startTime <= 0.05 ? 0.0 : item.data.startTime + PAD_OUT
+        const effEnd = item.data.endTime >= totalDuration - 0.05 ? totalDuration : item.data.endTime - PAD_IN
+        return effEnd > effStart + 0.04 && t >= effStart && t < effEnd
       }
     )
 
@@ -496,13 +512,22 @@ export default function App() {
         isSkippingRef.current = true
         lastSkippedIdRef.current = currentCut.data.id
 
-        // Jump cleanly past the cut point
-        const targetTime = Math.min(totalDuration, currentCut.data.endTime - PAD_IN + 0.01)
-        videoRef.current.currentTime = targetTime
+        const effEnd = currentCut.data.endTime >= totalDuration - 0.05
+          ? totalDuration
+          : currentCut.data.endTime - PAD_IN
+        const targetTime = Math.min(totalDuration, effEnd + 0.01)
 
-        setTimeout(() => {
+        if (targetTime >= totalDuration) {
+          videoRef.current.currentTime = totalDuration
+          videoRef.current.pause()
+          setIsPlaying(false)
           isSkippingRef.current = false
-        }, 80)
+        } else {
+          videoRef.current.currentTime = targetTime
+          setTimeout(() => {
+            isSkippingRef.current = false
+          }, 40)
+        }
       }
     } else {
       lastSkippedIdRef.current = null
@@ -548,37 +573,69 @@ export default function App() {
     )
   }
 
-  // Update text
+  // Update text and keep word-level synchronization aligned
   const handleTextChange = (id: string, newText: string) => {
     setItems((prev) =>
       prev.map((item) => {
         if (item.type === 'phrase' && item.data.id === id) {
-          return { ...item, data: { ...item.data, text: newText } }
+          const rawWords = newText.trim().split(/\s+/).filter(Boolean)
+          let updatedWords = item.data.words ? [...item.data.words] : []
+
+          if (rawWords.length === 0) {
+            updatedWords = []
+          } else if (updatedWords.length === rawWords.length) {
+            // Update words in-place preserving exact speech timestamps
+            updatedWords = updatedWords.map((w, idx) => ({
+              ...w,
+              word: rawWords[idx],
+            }))
+          } else {
+            // Re-distribute timestamps across newly edited words
+            const span = Math.max(0.05, item.data.endTime - item.data.startTime)
+            const count = rawWords.length
+            updatedWords = rawWords.map((w, idx) => ({
+              word: w,
+              startTime: Number((item.data.startTime + (idx / count) * span).toFixed(2)),
+              endTime: Number((item.data.startTime + ((idx + 1) / count) * span).toFixed(2)),
+            }))
+          }
+
+          return {
+            ...item,
+            data: {
+              ...item.data,
+              text: newText,
+              words: updatedWords,
+            },
+          }
         }
         return item
       })
     )
   }
 
-  // Export 1: Trimmed MP4 video with GPU Acceleration and styled subtitles (NO ZOOM)
+  // Export 1: Trimmed MP4 video
   const handleExportMP4 = async () => {
     try {
       if (!filePath) {
-        alert('Сначала откройте видеофайл')
+        alert('Сначала выберите видеофайл')
         return
       }
 
       const cuts = items
         .filter((i): i is { type: 'silence'; data: SilenceGap } => i.type === 'silence' && i.data.isCut)
         .map((s) => [s.data.startTime, s.data.endTime])
+        .filter(([start, end]) => end > start)
 
       const phrasesToExport = items
         .filter((i): i is { type: 'phrase'; data: Phrase } => i.type === 'phrase')
         .map((p) => p.data)
 
-      const defaultName = `subcut_${filePath.split(/[\\/]/).pop()}`
+      const baseName = filePath.split(/[\\/]/).pop()?.replace(/\.[^/.]+$/, '') || 'cut'
+      const defaultName = `${baseName}_cut.mp4`
+
       const outputPath = await invoke<string | null>('select_save_file_cmd', {
-        title: 'Сохранить готовое видео SubCut',
+        title: 'Сохранить видео',
         filter: 'MP4 Видео (*.mp4)|*.mp4',
         defaultName,
       })
@@ -596,9 +653,9 @@ export default function App() {
         phrases: phrasesToExport,
         hardwareAccel,
       })
-      alert(`Видео успешно смонтировано:\n${outputPath}`)
+      alert(`Видео сохранено:\n${outputPath}`)
     } catch (err) {
-      alert(`Ошибка экспорта видео: ${err}`)
+      alert(`Ошибка экспорта: ${err}`)
     } finally {
       setIsExporting(false)
     }
@@ -608,13 +665,14 @@ export default function App() {
   const handleExportSRT = async () => {
     try {
       if (!filePath) {
-        alert('Сначала откройте видеофайл')
+        alert('Сначала выберите видеофайл')
         return
       }
 
       const cuts = items
         .filter((i): i is { type: 'silence'; data: SilenceGap } => i.type === 'silence' && i.data.isCut)
         .map((s) => [s.data.startTime, s.data.endTime])
+        .filter(([start, end]) => end > start)
 
       const phrasesToExport = items
         .filter((i): i is { type: 'phrase'; data: Phrase } => i.type === 'phrase')
@@ -637,7 +695,7 @@ export default function App() {
         totalDuration,
         phrases: phrasesToExport,
       })
-      alert(`Субтитры успешно сохранены в .SRT:\n${outputPath}`)
+      alert(`Субтитры сохранены:\n${outputPath}`)
     } catch (err) {
       alert(`Ошибка экспорта субтитров: ${err}`)
     }
@@ -647,19 +705,20 @@ export default function App() {
   const handleExportEDL = async () => {
     try {
       if (!filePath) {
-        alert('Сначала откройте видеофайл')
+        alert('Сначала выберите видеофайл')
         return
       }
 
       const cuts = items
         .filter((i): i is { type: 'silence'; data: SilenceGap } => i.type === 'silence' && i.data.isCut)
         .map((s) => [s.data.startTime, s.data.endTime])
+        .filter(([start, end]) => end > start)
 
       const baseName = filePath.split(/[\\/]/).pop()?.replace(/\.[^/.]+$/, '') || 'subcut'
       const defaultName = `${baseName}_project.edl`
 
       const outputPath = await invoke<string | null>('select_save_file_cmd', {
-        title: 'Экспорт проекта монтажа EDL (Premiere Pro / DaVinci Resolve)',
+        title: 'Экспорт проекта EDL',
         filter: 'CMX 3600 EDL (*.edl)|*.edl',
         defaultName,
       })
@@ -674,16 +733,16 @@ export default function App() {
         fps: 30.0,
       })
       alert(
-        `Проект монтажа успешно экспортирован:\n${outputPath}\n\nКак открыть в DaVinci Resolve или Premiere Pro:\n1. Меню File -> Import -> Timeline\n2. Выберите созданный файл .edl`
+        `Проект EDL экспортирован:\n${outputPath}\n\nИмпорт в Premiere Pro или DaVinci Resolve:\nFile → Import → Timeline`
       )
     } catch (err) {
-      alert(`Ошибка экспорта проекта EDL: ${err}`)
+      alert(`Ошибка экспорта EDL: ${err}`)
     }
   }
 
   // Timeline click scrub
   const handleTimelineClick = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (!timelineRef.current) return
+    if (!timelineRef.current || totalDuration <= 0) return
     const rect = timelineRef.current.getBoundingClientRect()
     const clickX = e.clientX - rect.left
     const pct = Math.max(0, Math.min(1, clickX / rect.width))
@@ -711,12 +770,12 @@ export default function App() {
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [isPlaying, currentTime, totalDuration])
 
-  const fileName = filePath ? filePath.split(/[\\/]/).pop() : 'Нажмите чтобы выбрать видео'
+  const fileName = filePath ? filePath.split(/[\\/]/).pop() : 'Выберите видео'
 
   return (
     <div className="flex flex-col h-screen w-screen bg-zinc-950 text-zinc-100 font-sans select-none overflow-hidden">
       
-      {/* 1. TOP APP BAR: Minimal, Quiet, No Clutter (44px) */}
+      {/* 1. TOP APP BAR (44px) */}
       <header className="h-11 px-4 border-b border-zinc-800/80 bg-zinc-900/60 flex items-center justify-between flex-shrink-0 z-20">
         
         {/* Left: Branding & Open File */}
@@ -735,11 +794,11 @@ export default function App() {
             onClick={handleOpenFile}
             disabled={isAnalyzing}
             className="flex items-center gap-2 h-7 px-2.5 rounded bg-zinc-800/60 hover:bg-zinc-800 border border-zinc-700/60 text-xs text-zinc-300 hover:text-white transition max-w-sm truncate"
-            title="Выбрать другое видео"
+            title="Выбрать видео"
           >
             <FolderOpen className="w-3.5 h-3.5 text-zinc-400 flex-shrink-0" />
             <span className="font-mono truncate">
-              {isAnalyzing ? (analyzingStatus || 'Анализ через FFmpeg...') : fileName}
+              {isAnalyzing ? (analyzingStatus || 'Анализ видео...') : fileName}
             </span>
           </button>
 
@@ -747,11 +806,11 @@ export default function App() {
           <div className="hidden sm:flex items-center gap-2 text-xs font-mono text-zinc-500">
             <span>{formatTime(totalDuration)}</span>
             <span>•</span>
-            <span className="text-zinc-400">Пауз: {silences.length}</span>
+            <span className="text-zinc-400">Паузы: {silences.length}</span>
             {cutDuration > 0 && (
               <>
                 <span>•</span>
-                <span className="text-emerald-400 font-medium">-{cutDuration.toFixed(1)}с</span>
+                <span className="text-emerald-400 font-medium">-{cutDuration.toFixed(1)} с</span>
               </>
             )}
           </div>
@@ -768,7 +827,7 @@ export default function App() {
                 ? 'bg-zinc-800 text-zinc-200 border-zinc-600'
                 : 'bg-zinc-900/60 text-zinc-500 border-zinc-800 hover:text-zinc-300'
             }`}
-            title="Отображение и вшивание субтитров"
+            title="Субтитры"
           >
             <Type className="w-3.5 h-3.5" />
             <span className="hidden lg:inline">Субтитры</span>
@@ -787,7 +846,7 @@ export default function App() {
                 ? 'bg-zinc-700 text-white border-zinc-500'
                 : 'bg-zinc-800/50 hover:bg-zinc-800 text-zinc-300 border-zinc-700/60'
             }`}
-            title="Параметры монтажа, GPU-ускорения и субтитров"
+            title="Настройки монтажа и субтитров"
           >
             <SlidersHorizontal className="w-3.5 h-3.5 text-zinc-400" />
             <span className="hidden md:inline">Настройки</span>
@@ -799,7 +858,7 @@ export default function App() {
           <button
             onClick={() => setShowPauses(!showPauses)}
             className="h-7 px-2.5 rounded text-xs font-medium bg-zinc-800/50 hover:bg-zinc-800 border border-zinc-700/60 text-zinc-300 flex items-center gap-1.5 transition"
-            title="Показать/скрыть паузы"
+            title="Показать или скрыть паузы в тексте"
           >
             {showPauses ? <Eye className="w-3.5 h-3.5 text-zinc-400" /> : <EyeOff className="w-3.5 h-3.5 text-zinc-500" />}
             <span className="hidden md:inline">Паузы</span>
@@ -824,7 +883,7 @@ export default function App() {
             </button>
           )}
 
-          {/* Export Dropdown / Group */}
+          {/* Export Dropdown */}
           <div className="relative">
             <button
               onClick={() => setIsExportMenuOpen(!isExportMenuOpen)}
@@ -832,7 +891,7 @@ export default function App() {
               className="h-7 px-3 rounded text-xs font-semibold bg-zinc-100 hover:bg-white text-zinc-950 flex items-center gap-1.5 transition shadow-sm disabled:opacity-50"
             >
               <Download className="w-3.5 h-3.5" />
-              <span>{isExporting ? 'Монтаж...' : 'Экспорт'}</span>
+              <span>{isExporting ? 'Экспорт...' : 'Экспорт'}</span>
             </button>
 
             {/* Export Menu Dropdown */}
@@ -844,8 +903,8 @@ export default function App() {
                 >
                   <Zap className="w-4 h-4 text-emerald-400 flex-shrink-0" />
                   <div>
-                    <div className="font-medium text-white">Экспорт MP4 видео</div>
-                    <div className="text-[10px] text-zinc-400">GPU ускорение + субтитры</div>
+                    <div className="font-medium text-white">Видео MP4</div>
+                    <div className="text-[10px] text-zinc-400">Монтаж с субтитрами</div>
                   </div>
                 </button>
 
@@ -857,8 +916,8 @@ export default function App() {
                 >
                   <FileText className="w-4 h-4 text-amber-400 flex-shrink-0" />
                   <div>
-                    <div className="font-medium">Экспорт .SRT субтитров</div>
-                    <div className="text-[10px] text-zinc-400">Для YouTube / Telegram</div>
+                    <div className="font-medium">Субтитры SRT</div>
+                    <div className="text-[10px] text-zinc-400">Таймкоды для плееров</div>
                   </div>
                 </button>
 
@@ -868,8 +927,8 @@ export default function App() {
                 >
                   <Clapperboard className="w-4 h-4 text-sky-400 flex-shrink-0" />
                   <div>
-                    <div className="font-medium">Проект для Premiere / DaVinci</div>
-                    <div className="text-[10px] text-zinc-400">Таймлайн нарезки (.EDL)</div>
+                    <div className="font-medium">Таймлайн EDL</div>
+                    <div className="text-[10px] text-zinc-400">Premiere Pro и DaVinci</div>
                   </div>
                 </button>
               </div>
@@ -879,17 +938,16 @@ export default function App() {
         </div>
       </header>
 
-      {/* 2. MAIN SPLIT: Proportional Video Left / Clean Script Right */}
+      {/* 2. MAIN SPLIT: Video Left / Clean Script Right */}
       <div className="flex-1 flex overflow-hidden relative" onClick={() => isExportMenuOpen && setIsExportMenuOpen(false)}>
         
-        {/* LEFT PANE: Video Player Surface */}
+        {/* LEFT PANE: Video Player */}
         <section className="w-[50%] lg:w-[48%] border-r border-zinc-800/80 bg-zinc-950 flex flex-col justify-between p-4">
           
-          {/* Framed Video Container (9:16 or native aspect ratio, clean untouched framing — NO ZOOM) */}
+          {/* Framed Video Container */}
           <div className="relative flex-1 flex items-center justify-center min-h-0">
             <div className="relative aspect-[9/16] h-full max-h-[520px] bg-black rounded-lg border border-zinc-800/80 overflow-hidden shadow-2xl flex flex-col justify-between select-none">
               
-              {/* Real Video Element (Clean scale, native framing) */}
               {videoSrc ? (
                 <video
                   ref={videoRef}
@@ -914,16 +972,15 @@ export default function App() {
                   <div className="w-12 h-12 rounded-full bg-zinc-900 border border-zinc-800 group-hover:border-zinc-700 flex items-center justify-center text-zinc-400 mb-3 transition">
                     <FolderOpen className="w-5 h-5" />
                   </div>
-                  <span className="text-xs font-medium text-zinc-300">Нажмите чтобы загрузить видео</span>
-                  <span className="text-[11px] font-mono text-zinc-500 mt-1">MP4, MOV, MKV</span>
+                  <span className="text-xs font-medium text-zinc-300">Нажмите для выбора видео</span>
+                  <span className="text-[11px] font-mono text-zinc-500 mt-1">MP4, MOV, MKV, WebM</span>
                 </div>
               )}
 
-              {/* Advanced Subtitle Overlay (Hormozi Karaoke / Classic / Box) */}
+              {/* Subtitle Overlay */}
               {burnSubtitles && activePhrase && (
                 <div className="absolute inset-x-0 bottom-8 px-4 text-center pointer-events-none z-10 transition-all">
                   {subtitlePreset === 'hormozi' ? (
-                    // Hormozi Style: Bold All-Caps with dynamic active word highlight!
                     <div className="inline-block px-3 py-1.5 rounded bg-black/85 border border-black/60 shadow-2xl drop-shadow-[0_4px_10px_rgba(0,0,0,0.95)] max-w-[90%]">
                       {activePhrase.data.words && activePhrase.data.words.length > 0 ? (
                         activePhrase.data.words.map((w, wIdx) => {
@@ -950,12 +1007,10 @@ export default function App() {
                       )}
                     </div>
                   ) : subtitlePreset === 'box' ? (
-                    // Minimal Box Style
                     <span className="inline-block px-3.5 py-1.5 rounded-md bg-black/85 backdrop-blur-sm text-zinc-100 font-semibold text-xs md:text-sm border border-zinc-750/80 shadow-lg">
                       {activePhrase.data.text}
                     </span>
                   ) : (
-                    // Classic Clean Style
                     <span className="inline-block px-3 py-1.5 text-white font-bold text-sm md:text-base leading-tight drop-shadow-[0_2px_4px_rgba(0,0,0,0.95)]">
                       {activePhrase.data.text}
                     </span>
@@ -963,7 +1018,7 @@ export default function App() {
                 </div>
               )}
 
-              {/* Timecode badge in player corner */}
+              {/* Timecode badge */}
               <div className="absolute top-2.5 right-2.5 pointer-events-none z-10">
                 <span className="text-[10px] font-mono font-medium px-1.5 py-0.5 rounded bg-black/70 text-zinc-400 backdrop-blur-sm">
                   {formatTime(currentTime)}
@@ -972,13 +1027,13 @@ export default function App() {
             </div>
           </div>
 
-          {/* Transport Bar (Clean, Centered, Proportional) */}
+          {/* Transport Bar */}
           <div className="flex items-center justify-between pt-3 mt-2 border-t border-zinc-900 text-xs">
             <div className="flex items-center gap-1.5">
               <button
                 onClick={() => seekTo(0)}
                 className="w-7 h-7 rounded hover:bg-zinc-900 text-zinc-400 hover:text-zinc-200 flex items-center justify-center transition"
-                title="В начало (Home)"
+                title="В начало"
               >
                 <SkipBack className="w-3.5 h-3.5" />
               </button>
@@ -992,7 +1047,7 @@ export default function App() {
               <button
                 onClick={() => seekTo(currentTime + 5)}
                 className="w-7 h-7 rounded hover:bg-zinc-900 text-zinc-400 hover:text-zinc-200 flex items-center justify-center transition"
-                title="Вперёд на 5 сек"
+                title="Вперёд на 5 с"
               >
                 <SkipForward className="w-3.5 h-3.5" />
               </button>
@@ -1004,21 +1059,21 @@ export default function App() {
               </span>
               <span className="text-zinc-600">|</span>
               <span className="text-zinc-400">
-                Чистое: <strong className="text-emerald-400 font-normal">{formatTime(remainingDuration)}</strong>
+                Итог: <strong className="text-emerald-400 font-normal">{formatTime(remainingDuration)}</strong>
               </span>
             </div>
           </div>
 
         </section>
 
-        {/* RIGHT PANE: Clean Narrative Script (Like Notion / Descript — Zero Card Clutter!) */}
+        {/* RIGHT PANE: Script & Text */}
         <section className="flex-1 bg-zinc-900/40 flex flex-col justify-between overflow-hidden">
           
           {/* Header & Search */}
           <div className="h-10 px-4 border-b border-zinc-800/80 bg-zinc-900/60 flex items-center justify-between flex-shrink-0">
             <div className="flex items-center gap-2">
               <span className="text-xs font-semibold text-zinc-300 uppercase tracking-wider">
-                Скрипт и редакция текста
+                Текст и паузы
               </span>
             </div>
             
@@ -1026,7 +1081,7 @@ export default function App() {
               <Search className="w-3 h-3 absolute left-2 top-2 text-zinc-500" />
               <input
                 type="text"
-                placeholder="Поиск слова..."
+                placeholder="Поиск по тексту..."
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 className="w-full h-7 pl-6 pr-2 rounded bg-zinc-950/80 border border-zinc-800 text-[11px] text-zinc-200 placeholder-zinc-500 focus:outline-none focus:border-zinc-700"
@@ -1034,17 +1089,17 @@ export default function App() {
             </div>
           </div>
 
-          {/* Script Body (Clean Typography, Natural Text Flow) */}
+          {/* Script Body */}
           <div className="flex-1 overflow-y-auto p-5 space-y-4">
             
             <div className="text-xs text-zinc-500 font-mono mb-2 flex items-center justify-between">
-              <span>Кликните по любому слову чтобы перейти в плеере. Паузы тишины встроены в текст.</span>
+              <span>Клик по таймкоду — переход, по паузе — вырезать или оставить.</span>
               <span className="text-[11px] text-zinc-400 font-medium">Whisper: {whisperModel} · {speechLanguage.toUpperCase()}</span>
             </div>
 
             {items.map((item) => {
               if (item.type === 'phrase') {
-                const isActive = currentTime >= item.data.startTime && currentTime <= (item.data.endTime + 0.35)
+                const isActive = activePhrase?.data.id === item.data.id
                 const matchesSearch = searchQuery.trim() === '' || item.data.text.toLowerCase().includes(searchQuery.toLowerCase())
                 if (!matchesSearch) return null
 
@@ -1076,7 +1131,7 @@ export default function App() {
                 )
               }
 
-              // Silence Item — Rendered as a Clean Minimal Inline Pill
+              // Silence Item
               if (item.type === 'silence') {
                 if (!showPauses && item.data.isCut) return null
 
@@ -1089,11 +1144,11 @@ export default function App() {
                           ? 'bg-zinc-900 text-zinc-500 line-through border border-zinc-800 hover:bg-zinc-850'
                           : 'bg-red-950/40 text-red-300 border border-red-900/60 hover:bg-red-900/40'
                       }`}
-                      title="Кликните чтобы вырезать или оставить паузу"
+                      title="Кликните, чтобы вырезать или оставить паузу"
                     >
-                      <span>⏸ Пауза {item.data.duration.toFixed(1)}с</span>
+                      <span>Пауза {item.data.duration.toFixed(1)} с</span>
                       <span className="text-[10px] font-sans font-medium px-1 rounded bg-black/40">
-                        {item.data.isCut ? 'вырезано' : 'вырезать ✂'}
+                        {item.data.isCut ? 'вырезана' : 'вырезать'}
                       </span>
                     </span>
                   </div>
@@ -1107,7 +1162,7 @@ export default function App() {
 
         </section>
 
-        {/* 2.5 SETTINGS MODAL (TypeUI Shadcn Dark Studio Dialog) */}
+        {/* SETTINGS MODAL */}
         {isSettingsOpen && (
           <div className="absolute inset-0 bg-black/60 backdrop-blur-sm z-30 flex items-center justify-center p-4">
             <div className="w-full max-w-lg bg-zinc-900 border border-zinc-800 rounded-xl shadow-2xl p-6 space-y-5 animate-in fade-in duration-150">
@@ -1119,8 +1174,8 @@ export default function App() {
                     <SlidersHorizontal className="w-4 h-4" />
                   </div>
                   <div>
-                    <h2 className="text-sm font-semibold text-zinc-100">Параметры монтажа</h2>
-                    <p className="text-[11px] text-zinc-400">Настройка чувствительности алгоритмов, стилей субтитров и GPU</p>
+                    <h2 className="text-sm font-semibold text-zinc-100">Настройки</h2>
+                    <p className="text-[11px] text-zinc-400">Параметры монтажа, субтитров и кодека</p>
                   </div>
                 </div>
                 <button
@@ -1134,20 +1189,20 @@ export default function App() {
               {/* Body Controls */}
               <div className="space-y-4 text-xs">
                 
-                {/* 1. Subtitle Style Preset (Feature 2) */}
+                {/* 1. Subtitle Style Preset */}
                 <div className="space-y-1.5">
                   <div className="flex items-center justify-between">
                     <label className="font-medium text-zinc-200 flex items-center gap-1.5">
                       <Type className="w-3.5 h-3.5 text-amber-400" />
-                      <span>Стиль вирусных субтитров (Viral Presets)</span>
+                      <span>Стиль субтитров</span>
                     </label>
                     <span className="font-mono text-zinc-400 uppercase">{subtitlePreset}</span>
                   </div>
                   <div className="grid grid-cols-3 gap-2">
                     {[
-                      { id: 'hormozi' as const, title: 'Hormozi (Караоке)', desc: 'Желтая подсветка слов' },
-                      { id: 'classic' as const, title: 'Classic Clean', desc: 'Белый + контур внизу' },
-                      { id: 'box' as const, title: 'Minimal Box', desc: 'Темная плашка-фон' },
+                      { id: 'hormozi' as const, title: 'Караоке', desc: 'Подсветка активного слова' },
+                      { id: 'classic' as const, title: 'Классический', desc: 'Белый текст с контуром' },
+                      { id: 'box' as const, title: 'Плашка', desc: 'Полупрозрачный фон' },
                     ].map((st) => (
                       <button
                         key={st.id}
@@ -1169,19 +1224,19 @@ export default function App() {
 
                 <div className="h-px bg-zinc-800 my-2" />
 
-                {/* 2. GPU Hardware Acceleration (Feature 4) */}
+                {/* 2. GPU Hardware Acceleration */}
                 <div className="space-y-1.5">
                   <div className="flex items-center justify-between">
                     <label className="font-medium text-zinc-200 flex items-center gap-1.5">
                       <Zap className="w-3.5 h-3.5 text-emerald-400" />
-                      <span>Аппаратное ускорение рендера (GPU)</span>
+                      <span>Аппаратное ускорение (GPU)</span>
                     </label>
-                    <span className="font-mono text-emerald-400 font-medium">NVIDIA GTX 1050</span>
+                    <span className="font-mono text-emerald-400 font-medium">NVIDIA NVENC</span>
                   </div>
                   <div className="grid grid-cols-3 gap-2">
                     {[
-                      { id: 'auto' as const, label: 'Авто (Рекомендуется)' },
-                      { id: 'nvenc' as const, label: 'NVIDIA NVENC (GPU)' },
+                      { id: 'auto' as const, label: 'Авто' },
+                      { id: 'nvenc' as const, label: 'NVIDIA NVENC' },
                       { id: 'cpu' as const, label: 'CPU (libx264)' },
                     ].map((opt) => (
                       <button
@@ -1198,7 +1253,7 @@ export default function App() {
                     ))}
                   </div>
                   <p className="text-[10px] text-zinc-500">
-                    Рендер через чип NVENC на вашей GeForce GTX 1050 освобождает процессор и ускоряет экспорт в 5–10 раз.
+                    NVENC ускоряет экспорт на видеокартах NVIDIA.
                   </p>
                 </div>
 
@@ -1209,16 +1264,16 @@ export default function App() {
                   <div className="flex items-center justify-between">
                     <label className="font-medium text-zinc-200 flex items-center gap-1.5">
                       <Scissors className="w-3.5 h-3.5 text-red-400" />
-                      <span>Режим поиска пауз</span>
+                      <span>Поиск пауз</span>
                     </label>
                     <span className="font-mono text-zinc-400 text-xs">
-                      {pauseMode === 'smart' ? 'ИИ (по речи)' : 'FFmpeg (по громкости)'}
+                      {pauseMode === 'smart' ? 'По речи (Whisper)' : 'По громкости (FFmpeg)'}
                     </span>
                   </div>
                   <div className="grid grid-cols-2 gap-2">
                     {[
-                      { val: 'smart', label: 'Умный ИИ (по речи)', desc: 'Ищет паузы между репликами даже при громкой музыке' },
-                      { val: 'volume', label: 'По громкости (FFmpeg)', desc: 'Ищет участки тише порога dB (для студийных записей)' },
+                      { val: 'smart', label: 'По речи (Whisper)', desc: 'Паузы между словами, подходит для видео с музыкой' },
+                      { val: 'volume', label: 'По громкости', desc: 'Участки тише заданного порога, для записей без музыки' },
                     ].map((opt) => (
                       <button
                         key={opt.val}
@@ -1238,19 +1293,19 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* 4. Silence Threshold (dB) - only for volume mode */}
+                {/* 4. Silence Threshold (dB) */}
                 {pauseMode === 'volume' && (
                   <div className="space-y-1.5 animate-in fade-in duration-100">
                     <div className="flex items-center justify-between">
-                      <label className="font-medium text-zinc-200">Порог шума тишины (dB)</label>
+                      <label className="font-medium text-zinc-200">Порог громкости</label>
                       <span className="font-mono text-zinc-400">{silenceThreshold} dB</span>
                     </div>
                     <div className="grid grid-cols-4 gap-2">
                       {[
-                        { val: -22, label: '-22 dB (Музыка)' },
-                        { val: -25, label: '-25 dB (Шум)' },
-                        { val: -30, label: '-30 dB (Норма)' },
-                        { val: -35, label: '-35 dB (Студия)' },
+                        { val: -22, label: '-22 dB (шумный фон)' },
+                        { val: -25, label: '-25 dB (умеренный шум)' },
+                        { val: -30, label: '-30 dB (стандарт)' },
+                        { val: -35, label: '-35 dB (тихая комната)' },
                       ].map((opt) => (
                         <button
                           key={opt.val}
@@ -1268,18 +1323,18 @@ export default function App() {
                   </div>
                 )}
 
-                {/* 5. Minimum Silence Duration (seconds) */}
+                {/* 5. Minimum Silence Duration */}
                 <div className="space-y-1.5">
                   <div className="flex items-center justify-between">
-                    <label className="font-medium text-zinc-200">Минимальная длина паузы для вырезания</label>
+                    <label className="font-medium text-zinc-200">Минимальная пауза</label>
                     <span className="font-mono text-zinc-400">{minSilenceDuration} с</span>
                   </div>
                   <div className="grid grid-cols-4 gap-2">
                     {[
-                      { val: 0.3, label: '0.3с (Рилсы)' },
-                      { val: 0.5, label: '0.5с (Стандарт)' },
-                      { val: 0.8, label: '0.8с (Мягкий)' },
-                      { val: 1.0, label: '1.0с (Длинные)' },
+                      { val: 0.3, label: '0.3 с (короткие)' },
+                      { val: 0.5, label: '0.5 с (стандарт)' },
+                      { val: 0.8, label: '0.8 с (умеренные)' },
+                      { val: 1.0, label: '1.0 с (длинные)' },
                     ].map((opt) => (
                       <button
                         key={opt.val}
@@ -1307,7 +1362,7 @@ export default function App() {
                     className="w-full h-8 rounded bg-zinc-800 hover:bg-zinc-750 border border-zinc-700 text-zinc-200 flex items-center justify-center gap-2 font-medium transition text-xs"
                   >
                     <RefreshCw className={`w-3.5 h-3.5 ${isAnalyzing ? 'animate-spin' : ''}`} />
-                    <span>Пересчитать паузы ({pauseMode === 'smart' ? 'ИИ по речи' : 'FFmpeg dB'})</span>
+                    <span>Обновить паузы</span>
                   </button>
                 )}
 
@@ -1318,15 +1373,15 @@ export default function App() {
                   <div className="flex items-center justify-between">
                     <label className="font-medium text-zinc-200 flex items-center gap-1.5">
                       <Sparkles className="w-3.5 h-3.5 text-amber-400" />
-                      <span>Модель распознавания речи (Whisper)</span>
+                      <span>Модель Whisper</span>
                     </label>
                     <span className="font-mono text-zinc-400">{whisperModel}</span>
                   </div>
                   <div className="grid grid-cols-3 gap-2">
                     {[
-                      { val: 'tiny', label: 'tiny (~1с, черновик)' },
-                      { val: 'base', label: 'base (баланс, 3с)' },
-                      { val: 'small', label: 'small (макс. точность)' },
+                      { val: 'tiny', label: 'tiny (быстрая)' },
+                      { val: 'base', label: 'base (стандартная)' },
+                      { val: 'small', label: 'small (точная)' },
                     ].map((opt) => (
                       <button
                         key={opt.val}
@@ -1348,7 +1403,7 @@ export default function App() {
                   <div className="flex items-center justify-between">
                     <label className="font-medium text-zinc-200 flex items-center gap-1.5">
                       <Globe className="w-3.5 h-3.5 text-blue-400" />
-                      <span>Язык озвучки / распознавания</span>
+                      <span>Язык речи</span>
                     </label>
                     <span className="font-mono text-blue-400 font-semibold">{speechLanguage.toUpperCase()}</span>
                   </div>
@@ -1372,7 +1427,7 @@ export default function App() {
                     ))}
                   </div>
                   <p className="text-[10px] text-zinc-400">
-                    Для русскоязычных видео, аниме и клипов оставляйте «Русский» — это предотвращает пропуски слов и галлюцинации перевода на английский.
+                    Язык исходной речи для точного распознавания.
                   </p>
                 </div>
 
@@ -1387,7 +1442,7 @@ export default function App() {
                     className="w-full h-8 rounded bg-zinc-800 hover:bg-zinc-750 border border-zinc-700 text-zinc-200 flex items-center justify-center gap-2 font-medium transition text-xs"
                   >
                     <Sparkles className={`w-3.5 h-3.5 text-amber-400 ${isAnalyzing ? 'animate-spin' : ''}`} />
-                    <span>Перераспознать текст и субтитры ({whisperModel} · {speechLanguage.toUpperCase()})</span>
+                    <span>Распознать заново</span>
                   </button>
                 )}
 
@@ -1407,7 +1462,7 @@ export default function App() {
           </div>
         )}
 
-        {/* 2.6 FULLSCREEN PROGRESS OVERLAYS (No frozen white screens!) */}
+        {/* FULLSCREEN PROGRESS OVERLAYS */}
         {isAnalyzing && (
           <div className="absolute inset-0 bg-black/75 backdrop-blur-sm z-50 flex items-center justify-center p-4 select-none">
             <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-6 shadow-2xl flex items-center gap-4 max-w-md w-full animate-in fade-in duration-150">
@@ -1417,7 +1472,7 @@ export default function App() {
                   Обработка видео
                 </div>
                 <div className="text-xs text-zinc-400 mt-1 truncate">
-                  {analyzingStatus || 'Анализ через FFmpeg...'}
+                  {analyzingStatus || 'Обработка...'}
                 </div>
               </div>
             </div>
@@ -1430,10 +1485,10 @@ export default function App() {
               <Zap className="w-6 h-6 text-emerald-400 animate-pulse flex-shrink-0" />
               <div className="flex-1 min-w-0">
                 <div className="text-xs font-semibold text-zinc-100 uppercase tracking-wide">
-                  Монтаж и экспорт видео
+                  Экспорт видео
                 </div>
                 <div className="text-xs text-zinc-400 mt-1">
-                  {hardwareAccel === 'cpu' ? 'Рендер через процессор (CPU)...' : 'Аппаратный рендер NVIDIA NVENC...'}
+                  {hardwareAccel === 'cpu' ? 'Кодирование на CPU...' : 'Кодирование на GPU (NVENC)...'}
                 </div>
               </div>
             </div>
@@ -1442,7 +1497,7 @@ export default function App() {
 
       </div>
 
-      {/* 3. BOTTOM TIMELINE: Single Continuous Pro Track (Height 100px) */}
+      {/* 3. BOTTOM TIMELINE (Height 112px) */}
       <footer className="h-28 border-t border-zinc-800/80 bg-zinc-900/80 flex flex-col justify-between select-none flex-shrink-0 z-20">
         
         {/* Time ruler ticks */}
@@ -1460,21 +1515,21 @@ export default function App() {
           onClick={handleTimelineClick}
           className="relative flex-1 bg-zinc-950 cursor-pointer overflow-hidden flex items-center"
         >
-          {/* Continuous Dense Waveform Bars */}
+          {/* Waveform Bars */}
           <div className="absolute inset-0 flex items-center justify-between px-2 pointer-events-none">
             {waveform.map((peak, idx) => (
               <div
                 key={idx}
-                className="w-[2px] bg-zinc-400 rounded-full transition-all"
+                className="w-[2px] bg-zinc-400 rounded-full"
                 style={{ height: `${Math.max(8, peak * 0.7)}%` }}
               />
             ))}
           </div>
 
-          {/* Silence Overlay Zones on the Waveform */}
-          {silences.map((silence) => {
-            const left = (silence.data.startTime / totalDuration) * 100
-            const width = (silence.data.duration / totalDuration) * 100
+          {/* Silence Overlay Zones */}
+          {totalDuration > 0 && silences.map((silence) => {
+            const left = Math.min(100, Math.max(0, (silence.data.startTime / totalDuration) * 100))
+            const width = Math.min(100 - left, Math.max(0, (silence.data.duration / totalDuration) * 100))
             const isCut = silence.data.isCut
 
             return (
@@ -1490,7 +1545,7 @@ export default function App() {
                     ? 'bg-zinc-950/85 border-x border-zinc-800 opacity-60'
                     : 'bg-red-950/35 border-x border-red-700/80 hover:bg-red-950/50'
                 }`}
-                title={`Пауза: ${silence.data.duration.toFixed(1)}с. Кликните чтобы вырезать`}
+                title={`Пауза ${silence.data.duration.toFixed(1)} с (клик — вырезать/оставить)`}
               >
                 <span
                   className={`text-[9px] font-mono px-1 py-0.5 rounded shadow-sm ${
@@ -1507,8 +1562,8 @@ export default function App() {
 
           {/* Precision 1px Red Playhead Needle */}
           <div
-            className="absolute top-0 bottom-0 w-px bg-red-500 z-30 pointer-events-none transition-all duration-75"
-            style={{ left: `${(currentTime / totalDuration) * 100}%` }}
+            className="absolute top-0 bottom-0 w-px bg-red-500 z-30 pointer-events-none"
+            style={{ left: `${totalDuration > 0 ? (currentTime / totalDuration) * 100 : 0}%` }}
           >
             <div className="w-2.5 h-2.5 bg-red-500 rotate-45 -ml-[4px] -top-1 absolute shadow-sm" />
           </div>
@@ -1517,18 +1572,16 @@ export default function App() {
         {/* Timeline Bottom Legend */}
         <div className="h-6 px-4 bg-zinc-900 border-t border-zinc-800/50 flex items-center justify-between text-[10px] font-mono text-zinc-500">
           <div className="flex items-center gap-3">
-            <span>Клик по таймлайну: переместить курсор</span>
+            <span>Пробел — воспроизведение/пауза</span>
             <span>•</span>
-            <span>Пробел: Старт/Пауза</span>
-            <span>•</span>
-            <span className="text-zinc-400">Стрелки ← / →: переход ±2с</span>
+            <span className="text-zinc-400">← / → — переход на 2 с</span>
           </div>
           <div className="flex items-center gap-2">
-            <span>Паузы: {pauseMode === 'smart' ? 'ИИ (по речи)' : `FFmpeg (${silenceThreshold}dB)`}</span>
+            <span>Паузы: {pauseMode === 'smart' ? 'по речи' : `по громкости (${silenceThreshold} dB)`}</span>
             <span>•</span>
-            <span>Мин: {minSilenceDuration}с</span>
+            <span>Мин. пауза: {minSilenceDuration} с</span>
             <span>•</span>
-            <span className="text-emerald-400 font-medium">NVENC GPU Active</span>
+            <span className="text-emerald-400 font-medium">GPU: NVENC</span>
           </div>
         </div>
 

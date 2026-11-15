@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 #[cfg(target_os = "windows")]
@@ -15,7 +16,7 @@ pub fn new_command(program: &str) -> Command {
     cmd
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SilenceGap {
     pub id: String,
     #[serde(rename = "startTime")]
@@ -27,7 +28,7 @@ pub struct SilenceGap {
     pub is_cut: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Word {
     pub word: String,
     #[serde(rename = "startTime")]
@@ -36,7 +37,7 @@ pub struct Word {
     pub end_time: f64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Phrase {
     pub id: String,
     pub speaker: String,
@@ -58,62 +59,136 @@ pub struct VideoInfo {
     pub fps: f64,
 }
 
-/// Helper to calculate keep intervals with 120ms/100ms smooth speech padding
+/// Helper to calculate keep intervals with speech edge padding (120ms decay / 100ms onset)
+/// Correctly handles empty cuts, overlapping cuts, out of bounds cuts, and NaN values.
+/// Preserves true video boundaries without creating micro-slivers at 0.0 or total_duration.
 pub fn calculate_keep_intervals(cut_intervals: &[(f64, f64)], total_duration: f64) -> Vec<(f64, f64)> {
+    if !total_duration.is_finite() || total_duration <= 0.05 {
+        return Vec::new();
+    }
+
     const PAD_OUT: f64 = 0.12; // preserve voice decay tail
     const PAD_IN: f64 = 0.10;  // preserve breath onset
 
-    let mut keep_intervals = Vec::new();
-    let mut current_pos = 0.0;
+    // 1. Sanitize and sort raw cuts
+    let mut valid_cuts = Vec::new();
+    for &(start, end) in cut_intervals {
+        if !start.is_finite() || !end.is_finite() {
+            continue;
+        }
+        let clamped_start = start.clamp(0.0, total_duration);
+        let clamped_end = end.clamp(0.0, total_duration);
+        if clamped_end > clamped_start {
+            valid_cuts.push((clamped_start, clamped_end));
+        }
+    }
+    valid_cuts.sort_by(|a, b| a.0.total_cmp(&b.0));
 
-    let mut sorted_cuts = cut_intervals.to_vec();
-    sorted_cuts.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
-
-    for &(cut_start, cut_end) in &sorted_cuts {
-        let eff_start = (cut_start + PAD_OUT).min(cut_end);
-        let eff_end = (cut_end - PAD_IN).max(eff_start);
-
-        if eff_end - eff_start > 0.08 {
-            if eff_start > current_pos + 0.05 {
-                keep_intervals.push((current_pos, eff_start));
+    // 2. Merge overlapping raw cuts
+    let mut merged_raw: Vec<(f64, f64)> = Vec::new();
+    for (start, end) in valid_cuts {
+        if let Some(last) = merged_raw.last_mut() {
+            if start <= last.1 {
+                last.1 = last.1.max(end);
+                continue;
             }
-            current_pos = current_pos.max(eff_end);
+        }
+        merged_raw.push((start, end));
+    }
+
+    // 3. Apply padding to create effective cut intervals.
+    // Boundary protection:
+    // If cut starts at 0.0, do not pad with PAD_OUT (there is no speech tail before 0.0).
+    // If cut ends at total_duration, do not pad with PAD_IN (there is no speech onset after video end).
+    let mut eff_cuts: Vec<(f64, f64)> = Vec::new();
+    for (cut_start, cut_end) in merged_raw {
+        let eff_start = if cut_start <= 0.05 {
+            0.0
+        } else {
+            (cut_start + PAD_OUT).min(cut_end)
+        };
+        let eff_end = if cut_end >= total_duration - 0.05 {
+            total_duration
+        } else {
+            (cut_end - PAD_IN).max(eff_start)
+        };
+
+        if eff_end - eff_start > 0.04 {
+            if let Some(last) = eff_cuts.last_mut() {
+                if eff_start <= last.1 {
+                    last.1 = last.1.max(eff_end);
+                    continue;
+                }
+            }
+            eff_cuts.push((eff_start, eff_end));
         }
     }
 
-    if current_pos < total_duration - 0.05 {
+    // 4. Invert cuts into keep intervals
+    let mut keep_intervals = Vec::new();
+    let mut current_pos = 0.0;
+
+    for (cut_start, cut_end) in eff_cuts {
+        if cut_start > current_pos + 0.04 {
+            keep_intervals.push((current_pos, cut_start));
+        }
+        current_pos = current_pos.max(cut_end);
+    }
+
+    if current_pos < total_duration - 0.04 {
         keep_intervals.push((current_pos, total_duration));
     }
 
     keep_intervals
 }
 
+/// Maps a timestamp from the original unedited video into the edited video timeline
+pub fn map_original_to_trimmed(t: f64, keep_intervals: &[(f64, f64)]) -> f64 {
+    let mut out_time = 0.0;
+    for &(k_start, k_end) in keep_intervals {
+        if t < k_start {
+            return out_time;
+        } else if t <= k_end {
+            return out_time + (t - k_start);
+        } else {
+            out_time += k_end - k_start;
+        }
+    }
+    out_time
+}
+
 /// Helper to format seconds as ASS timestamp format (H:MM:SS.cs)
-fn format_ass_time(seconds: f64) -> String {
+pub fn format_ass_time(seconds: f64) -> String {
     let s = seconds.max(0.0);
-    let h = (s / 3600.0).floor() as u32;
-    let m = ((s % 3600.0) / 60.0).floor() as u32;
-    let sec = (s % 60.0).floor() as u32;
-    let cs = ((s % 1.0) * 100.0).round() as u32;
+    let total_cs = (s * 100.0).round() as u64;
+    let cs = total_cs % 100;
+    let total_sec = total_cs / 100;
+    let sec = total_sec % 60;
+    let total_min = total_sec / 60;
+    let m = total_min % 60;
+    let h = total_min / 60;
     format!("{}:{:02}:{:02}.{:02}", h, m, sec, cs)
 }
 
 /// Helper to format seconds as SRT timestamp format (HH:MM:SS,mmm)
-fn format_srt_time(seconds: f64) -> String {
+pub fn format_srt_time(seconds: f64) -> String {
     let s = seconds.max(0.0);
-    let h = (s / 3600.0).floor() as u32;
-    let m = ((s % 3600.0) / 60.0).floor() as u32;
-    let sec = (s % 60.0).floor() as u32;
-    let ms = ((s % 1.0) * 1000.0).round() as u32;
+    let total_ms = (s * 1000.0).round() as u64;
+    let ms = total_ms % 1000;
+    let total_sec = total_ms / 1000;
+    let sec = total_sec % 60;
+    let total_min = total_sec / 60;
+    let m = total_min % 60;
+    let h = total_min / 60;
     format!("{:02}:{:02}:{:02},{:03}", h, m, sec, ms)
 }
 
-/// Helper to format seconds as EDL timecode format (HH:MM:SS:FF)
-fn seconds_to_edl_tc(seconds: f64, fps: f64) -> String {
-    let fps_val = if fps > 0.0 { fps } else { 30.0 };
-    let total_frames = (seconds * fps_val).round() as u64;
-    let frames = total_frames % (fps_val.round() as u64);
-    let total_seconds = total_frames / (fps_val.round() as u64);
+/// Helper to format frame count as EDL timecode format (HH:MM:SS:FF)
+pub fn frames_to_edl_tc(total_frames: u64, fps: f64) -> String {
+    let fps_val = if fps > 0.0 { fps.round() as u64 } else { 30 };
+    let fps_u = if fps_val > 0 { fps_val } else { 30 };
+    let frames = total_frames % fps_u;
+    let total_seconds = total_frames / fps_u;
     let s = total_seconds % 60;
     let total_minutes = total_seconds / 60;
     let m = total_minutes % 60;
@@ -121,27 +196,30 @@ fn seconds_to_edl_tc(seconds: f64, fps: f64) -> String {
     format!("{:02}:{:02}:{:02}:{:02}", h, m, s, frames)
 }
 
+/// Helper to format seconds as EDL timecode format (HH:MM:SS:FF)
+#[allow(dead_code)]
+pub fn seconds_to_edl_tc(seconds: f64, fps: f64) -> String {
+    let fps_val = if fps > 0.0 { fps } else { 30.0 };
+    let total_frames = (seconds.max(0.0) * fps_val).round() as u64;
+    frames_to_edl_tc(total_frames, fps_val)
+}
+
+/// RAII Guard to ensure temp files are removed when out of scope
+struct TempFileGuard<'a>(&'a Path);
+impl<'a> Drop for TempFileGuard<'a> {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(self.0);
+    }
+}
+
 /// Generates an ASS subtitle file with configurable style presets (Hormozi, Classic, Box)
+/// Automatically skips phrases or words that fall into cut-out sections.
 pub fn generate_ass_subtitles(
     phrases: &[Phrase],
     keep_intervals: &[(f64, f64)],
     output_path: &str,
     preset: &str,
 ) -> Result<(), String> {
-    let map_time = |t: f64| -> f64 {
-        let mut out_time = 0.0;
-        for &(k_start, k_end) in keep_intervals {
-            if t < k_start {
-                return out_time;
-            } else if t <= k_end {
-                return out_time + (t - k_start);
-            } else {
-                out_time += k_end - k_start;
-            }
-        }
-        out_time
-    };
-
     let mut ass = String::new();
     ass.push_str("[Script Info]\n");
     ass.push_str("ScriptType: v4.00+\n");
@@ -174,27 +252,71 @@ pub fn generate_ass_subtitles(
         if text.is_empty() {
             continue;
         }
-        let start = map_time(p.start_time);
-        let mut end = map_time(p.end_time);
 
-        // Ensure at least 0.5s readability unless next phrase starts sooner
-        if let Some(next_p) = phrases.get(i + 1) {
-            let next_start = map_time(next_p.start_time);
-            if next_start > start + 0.05 {
-                end = end.max(start + 0.5).min(next_start - 0.05);
-            }
-        } else {
-            end = end.max(start + 0.5);
+        let start = map_original_to_trimmed(p.start_time, keep_intervals);
+        let end = map_original_to_trimmed(p.end_time, keep_intervals);
+
+        // If the phrase fell completely inside a cut interval, do not emit it
+        if end <= start + 0.04 {
+            continue;
         }
 
-        if end > start + 0.08 {
-            let event_text = if preset == "hormozi" && !p.words.is_empty() {
+        // Find the start of the next preserved phrase to prevent subtitle overlap
+        let mut next_start_opt = None;
+        for next_p in &phrases[(i + 1)..] {
+            let ns = map_original_to_trimmed(next_p.start_time, keep_intervals);
+            let ne = map_original_to_trimmed(next_p.end_time, keep_intervals);
+            if ne > ns + 0.04 {
+                next_start_opt = Some(ns);
+                break;
+            }
+        }
+
+        let mut display_end = end;
+        if let Some(next_start) = next_start_opt {
+            if next_start > start + 0.05 {
+                display_end = display_end.max(start + 0.5).min(next_start - 0.05);
+            }
+        } else {
+            display_end = display_end.max(start + 0.5);
+        }
+
+        if display_end > start + 0.05 {
+            // Filter words that fall into kept video
+            let active_words: Vec<_> = p
+                .words
+                .iter()
+                .filter(|w| {
+                    let ws = map_original_to_trimmed(w.start_time, keep_intervals);
+                    let we = map_original_to_trimmed(w.end_time, keep_intervals);
+                    we > ws + 0.02
+                })
+                .collect();
+
+            let event_text = if preset == "hormozi" && !active_words.is_empty() {
                 // Word-by-word karaoke highlight for Hormozi preset
                 let mut line = String::new();
-                for w in &p.words {
-                    let w_start = map_time(w.start_time);
-                    let w_end = map_time(w.end_time);
-                    let dur_cs = (((w_end - w_start).max(0.04)) * 100.0).round() as u32;
+                let first_w_start = map_original_to_trimmed(active_words[0].start_time, keep_intervals);
+                if first_w_start > start + 0.02 {
+                    let lead_cs = ((first_w_start - start) * 100.0).round() as u32;
+                    if lead_cs > 0 {
+                        line.push_str(&format!("{{\\k{}}}", lead_cs));
+                    }
+                }
+                for (w_i, w) in active_words.iter().enumerate() {
+                    let w_start = map_original_to_trimmed(w.start_time, keep_intervals);
+                    let w_end = map_original_to_trimmed(w.end_time, keep_intervals);
+                    let dur_sec = if w_i + 1 < active_words.len() {
+                        let next_start = map_original_to_trimmed(active_words[w_i + 1].start_time, keep_intervals);
+                        if next_start > w_start {
+                            (next_start - w_start).max(0.04)
+                        } else {
+                            (w_end - w_start).max(0.04)
+                        }
+                    } else {
+                        (w_end - w_start).max(0.04)
+                    };
+                    let dur_cs = (dur_sec * 100.0).round() as u32;
                     let clean_w = w.word.to_uppercase().replace('{', "(").replace('}', ")");
                     line.push_str(&format!("{{\\k{}}}{} ", dur_cs, clean_w));
                 }
@@ -208,7 +330,7 @@ pub fn generate_ass_subtitles(
             ass.push_str(&format!(
                 "Dialogue: 0,{},{},Default,,0,0,0,,{}\n",
                 format_ass_time(start),
-                format_ass_time(end),
+                format_ass_time(display_end),
                 event_text
             ));
         }
@@ -229,20 +351,6 @@ pub fn export_subtitles_srt(
 ) -> Result<(), String> {
     let keep_intervals = calculate_keep_intervals(cut_intervals, total_duration);
 
-    let map_time = |t: f64| -> f64 {
-        let mut out_time = 0.0;
-        for &(k_start, k_end) in &keep_intervals {
-            if t < k_start {
-                return out_time;
-            } else if t <= k_end {
-                return out_time + (t - k_start);
-            } else {
-                out_time += k_end - k_start;
-            }
-        }
-        out_time
-    };
-
     let mut srt = String::new();
     let mut index = 1;
 
@@ -251,25 +359,40 @@ pub fn export_subtitles_srt(
         if text.is_empty() {
             continue;
         }
-        let start = map_time(p.start_time);
-        let mut end = map_time(p.end_time);
 
-        // Ensure at least 0.5s readability unless next phrase starts sooner
-        if let Some(next_p) = phrases.get(i + 1) {
-            let next_start = map_time(next_p.start_time);
-            if next_start > start + 0.05 {
-                end = end.max(start + 0.5).min(next_start - 0.05);
-            }
-        } else {
-            end = end.max(start + 0.5);
+        let start = map_original_to_trimmed(p.start_time, &keep_intervals);
+        let end = map_original_to_trimmed(p.end_time, &keep_intervals);
+
+        // Skip phrases that were cut out
+        if end <= start + 0.04 {
+            continue;
         }
 
-        if end > start + 0.08 {
+        let mut next_start_opt = None;
+        for next_p in &phrases[(i + 1)..] {
+            let ns = map_original_to_trimmed(next_p.start_time, &keep_intervals);
+            let ne = map_original_to_trimmed(next_p.end_time, &keep_intervals);
+            if ne > ns + 0.04 {
+                next_start_opt = Some(ns);
+                break;
+            }
+        }
+
+        let mut display_end = end;
+        if let Some(next_start) = next_start_opt {
+            if next_start > start + 0.05 {
+                display_end = display_end.max(start + 0.5).min(next_start - 0.05);
+            }
+        } else {
+            display_end = display_end.max(start + 0.5);
+        }
+
+        if display_end > start + 0.05 {
             srt.push_str(&format!(
                 "{}\n{} --> {}\n{}\n\n",
                 index,
                 format_srt_time(start),
-                format_srt_time(end),
+                format_srt_time(display_end),
                 text
             ));
             index += 1;
@@ -292,7 +415,7 @@ pub fn export_project_edl(
 ) -> Result<(), String> {
     let keep_intervals = calculate_keep_intervals(cut_intervals, total_duration);
 
-    let clip_filename = std::path::Path::new(input_path)
+    let clip_filename = Path::new(input_path)
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("clip.mov");
@@ -301,18 +424,25 @@ pub fn export_project_edl(
     edl.push_str("TITLE: SubCut Project\n");
     edl.push_str("FCM: NON-DROP FRAME\n\n");
 
-    let mut rec_current = 0.0;
+    let fps_val = if fps > 0.0 { fps } else { 30.0 };
+    let mut rec_current_frames: u64 = 0;
 
     for (i, &(src_in, src_out)) in keep_intervals.iter().enumerate() {
-        let dur = src_out - src_in;
-        let rec_in = rec_current;
-        let rec_out = rec_current + dur;
-        rec_current = rec_out;
+        let src_in_frames = (src_in.max(0.0) * fps_val).round() as u64;
+        let src_out_frames = (src_out.max(0.0) * fps_val).round() as u64;
+        let frame_count = src_out_frames.saturating_sub(src_in_frames);
+        if frame_count == 0 {
+            continue;
+        }
 
-        let src_in_tc = seconds_to_edl_tc(src_in, fps);
-        let src_out_tc = seconds_to_edl_tc(src_out, fps);
-        let rec_in_tc = seconds_to_edl_tc(rec_in, fps);
-        let rec_out_tc = seconds_to_edl_tc(rec_out, fps);
+        let rec_in_frames = rec_current_frames;
+        let rec_out_frames = rec_in_frames + frame_count;
+        rec_current_frames = rec_out_frames;
+
+        let src_in_tc = frames_to_edl_tc(src_in_frames, fps_val);
+        let src_out_tc = frames_to_edl_tc(src_out_frames, fps_val);
+        let rec_in_tc = frames_to_edl_tc(rec_in_frames, fps_val);
+        let rec_out_tc = frames_to_edl_tc(rec_out_frames, fps_val);
 
         let event_num = format!("{:03}", (i + 1).min(999));
         edl.push_str(&format!(
@@ -452,9 +582,32 @@ pub fn extract_waveform(path: &str, points: usize) -> Result<Vec<u8>, String> {
     Ok(peaks)
 }
 
+/// Checks if an input video has an audio stream
+pub fn has_audio_stream(path: &str) -> bool {
+    if let Ok(output) = new_command("ffprobe")
+        .args(&[
+            "-v",
+            "error",
+            "-select_streams",
+            "a:0",
+            "-show_entries",
+            "stream=codec_type",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            path,
+        ])
+        .output()
+    {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        stdout.trim().to_lowercase().contains("audio")
+    } else {
+        false
+    }
+}
+
 /// Cuts video without quality degradation using filter_complex concat
-/// Applies audio micro-crossfades (25ms) and speech edge padding (0.12s out / 0.10s in)
-/// Supports GPU NVENC acceleration and styled subtitle burn-in. (Zoom has been completely removed)
+/// Applies audio micro-crossfades and speech edge padding (0.12s out / 0.10s in)
+/// Supports GPU NVENC acceleration and styled subtitle burn-in.
 pub fn export_trimmed_video(
     input_path: &str,
     cut_intervals: &[(f64, f64)],
@@ -471,46 +624,81 @@ pub fn export_trimmed_video(
         return Err("Все фрагменты видео вырезаны".into());
     }
 
-    // Subtitle file generation (if enabled)
-    let temp_ass_path = format!("{}.temp_subtitles.ass", output_path);
+    let has_audio = has_audio_stream(input_path);
+
+    // Subtitle file generation (if enabled) in temporary directory
+    let temp_file_name = format!(
+        "subcut_subtitles_{}_{}.ass",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0)
+    );
+    let temp_ass_path = std::env::temp_dir().join(temp_file_name);
+    let _ass_guard = TempFileGuard(&temp_ass_path);
     let should_burn = burn_subtitles && !phrases.is_empty();
 
     if should_burn {
-        generate_ass_subtitles(phrases, &keep_intervals, &temp_ass_path, subtitle_preset)?;
+        let temp_ass_str = temp_ass_path.to_string_lossy().to_string();
+        generate_ass_subtitles(phrases, &keep_intervals, &temp_ass_str, subtitle_preset)?;
     }
 
-    // Build filter_complex string with 25ms audio micro-fades (NO ZOOM)
+    // Build filter_complex string
     let mut filter_complex = String::new();
     let mut concat_inputs = String::new();
 
     for (i, &(start, end)) in keep_intervals.iter().enumerate() {
         let dur = end - start;
-        let fade_len = (dur * 0.15).min(0.025); // 25ms fade
 
         filter_complex.push_str(&format!(
             "[0:v]trim=start={:.3}:end={:.3},setpts=PTS-STARTPTS[v{}];",
             start, end, i
         ));
-        filter_complex.push_str(&format!(
-            "[0:a]atrim=start={:.3}:end={:.3},asetpts=PTS-STARTPTS,afade=t=in:st=0:d={:.3},afade=t=out:st={:.3}:d={:.3}[a{}];",
-            start, end, fade_len, (dur - fade_len).max(0.0), fade_len, i
-        ));
-        concat_inputs.push_str(&format!("[v{}][a{}]", i, i));
+
+        if has_audio {
+            let fade_len = (dur * 0.10).min(0.025); // audio fade length
+            if fade_len >= 0.005 {
+                filter_complex.push_str(&format!(
+                    "[0:a]atrim=start={:.3}:end={:.3},asetpts=PTS-STARTPTS,afade=t=in:st=0:d={:.3},afade=t=out:st={:.3}:d={:.3}[a{}];",
+                    start, end, fade_len, (dur - fade_len).max(0.0), fade_len, i
+                ));
+            } else {
+                filter_complex.push_str(&format!(
+                    "[0:a]atrim=start={:.3}:end={:.3},asetpts=PTS-STARTPTS[a{}];",
+                    start, end, i
+                ));
+            }
+            concat_inputs.push_str(&format!("[v{}][a{}]", i, i));
+        } else {
+            concat_inputs.push_str(&format!("[v{}]", i));
+        }
     }
+
+    let audio_param = if has_audio { "a=1" } else { "a=0" };
+    let audio_out_tag = if has_audio { "[outa]" } else { "" };
 
     if should_burn {
         filter_complex.push_str(&format!(
-            "{}concat=n={}:v=1:a=1[concatv][outa];",
+            "{}concat=n={}:v=1:{}[concatv]{};",
             concat_inputs,
-            keep_intervals.len()
+            keep_intervals.len(),
+            audio_param,
+            audio_out_tag
         ));
-        let escaped_ass = temp_ass_path.replace('\\', "/").replace(':', "\\:");
+        let temp_ass_str = temp_ass_path.to_string_lossy().to_string();
+        let escaped_ass = temp_ass_str
+            .replace('\\', "/")
+            .replace(':', "\\:")
+            .replace('\'', "'\\''");
         filter_complex.push_str(&format!("[concatv]subtitles='{}'[outv]", escaped_ass));
     } else {
         filter_complex.push_str(&format!(
-            "{}concat=n={}:v=1:a=1[outv][outa]",
+            "{}concat=n={}:v=1:{}[outv]{}",
             concat_inputs,
-            keep_intervals.len()
+            keep_intervals.len(),
+            audio_param,
+            audio_out_tag
         ));
     }
 
@@ -526,9 +714,11 @@ pub fn export_trimmed_video(
         filter_complex.clone(),
         "-map".to_string(),
         "[outv]".to_string(),
-        "-map".to_string(),
-        "[outa]".to_string(),
     ];
+
+    if has_audio {
+        base_args.extend(vec!["-map".to_string(), "[outa]".to_string()]);
+    }
 
     if use_nvenc {
         base_args.extend(vec![
@@ -550,19 +740,24 @@ pub fn export_trimmed_video(
         ]);
     }
 
-    base_args.extend(vec![
-        "-c:a".to_string(),
-        "aac".to_string(),
-        "-b:a".to_string(),
-        "192k".to_string(),
-        output_path.to_string(),
-    ]);
+    if has_audio {
+        base_args.extend(vec![
+            "-c:a".to_string(),
+            "aac".to_string(),
+            "-b:a".to_string(),
+            "192k".to_string(),
+        ]);
+    } else {
+        base_args.push("-an".to_string());
+    }
+
+    base_args.push(output_path.to_string());
 
     let mut output = new_command("ffmpeg").args(&base_args).output();
 
     // If NVENC failed and auto was selected, try CPU fallback
-    if use_nvenc && (output.is_err() || !output.as_ref().unwrap().status.success()) {
-        let cpu_args = vec![
+    if use_nvenc && hardware_accel == "auto" && (output.is_err() || !output.as_ref().unwrap().status.success()) {
+        let mut cpu_args = vec![
             "-y".to_string(),
             "-hide_banner".to_string(),
             "-i".to_string(),
@@ -571,29 +766,33 @@ pub fn export_trimmed_video(
             filter_complex,
             "-map".to_string(),
             "[outv]".to_string(),
-            "-map".to_string(),
-            "[outa]".to_string(),
+        ];
+        if has_audio {
+            cpu_args.extend(vec!["-map".to_string(), "[outa]".to_string()]);
+        }
+        cpu_args.extend(vec![
             "-c:v".to_string(),
             "libx264".to_string(),
             "-preset".to_string(),
             "fast".to_string(),
             "-crf".to_string(),
             "18".to_string(),
-            "-c:a".to_string(),
-            "aac".to_string(),
-            "-b:a".to_string(),
-            "192k".to_string(),
-            output_path.to_string(),
-        ];
+        ]);
+        if has_audio {
+            cpu_args.extend(vec![
+                "-c:a".to_string(),
+                "aac".to_string(),
+                "-b:a".to_string(),
+                "192k".to_string(),
+            ]);
+        } else {
+            cpu_args.push("-an".to_string());
+        }
+        cpu_args.push(output_path.to_string());
         output = new_command("ffmpeg").args(&cpu_args).output();
     }
 
-    // Clean up temporary ASS file
-    if should_burn {
-        let _ = std::fs::remove_file(&temp_ass_path);
-    }
-
-    let output = output.map_err(|e| format!("Ошибка выполнения FFmpeg: {}", e))?;
+    let output = output.map_err(|e| format!("Ошибка запуска FFmpeg: {}", e))?;
 
     if !output.status.success() {
         let err = String::from_utf8_lossy(&output.stderr);
@@ -603,16 +802,261 @@ pub fn export_trimmed_video(
     Ok(())
 }
 
+/// Locates transcribe.py in the application or source tree
+pub fn get_transcribe_script_path() -> PathBuf {
+    if let Ok(mut exe) = std::env::current_exe() {
+        exe.pop();
+        let candidate = exe.join("transcribe.py");
+        if candidate.exists() {
+            return candidate;
+        }
+        let res_candidate = exe.join("resources").join("transcribe.py");
+        if res_candidate.exists() {
+            return res_candidate;
+        }
+    }
+    PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "\\transcribe.py"))
+}
+
 /// Transcribes speech using faster-whisper INT8 helper with configurable model, language, and word timestamps
 pub fn transcribe_speech(path: &str, model_size: &str, language: &str) -> Result<Vec<Phrase>, String> {
-    let script_path = concat!(env!("CARGO_MANIFEST_DIR"), "\\transcribe.py");
+    let script_path = get_transcribe_script_path();
+    if !script_path.exists() {
+        return Err(format!(
+            "Скрипт распознавания transcribe.py не найден: {}",
+            script_path.display()
+        ));
+    }
+
     let output = new_command("python")
         .env("PYTHONIOENCODING", "utf-8")
-        .args(&[script_path, path, model_size, language])
+        .args(&[
+            script_path.to_string_lossy().as_ref(),
+            path,
+            model_size,
+            language,
+        ])
         .output()
-        .map_err(|e| format!("Не удалось вызвать Whisper: {}", e))?;
+        .map_err(|e| format!("Не удалось запустить Python для Whisper: {}", e))?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let phrases: Vec<Phrase> = serde_json::from_str(stdout.trim()).unwrap_or_default();
-    Ok(phrases)
+    let trimmed = stdout.trim();
+
+    if !trimmed.is_empty() {
+        if let Ok(phrases) = serde_json::from_str::<Vec<Phrase>>(trimmed) {
+            return Ok(phrases);
+        }
+    }
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("Ошибка Whisper: {}", stderr.trim()));
+    }
+
+    Ok(Vec::new())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_calculate_keep_intervals_no_cuts() {
+        let cuts: Vec<(f64, f64)> = vec![];
+        let keep = calculate_keep_intervals(&cuts, 20.0);
+        assert_eq!(keep.len(), 1);
+        assert_eq!(keep[0], (0.0, 20.0));
+    }
+
+    #[test]
+    fn test_calculate_keep_intervals_single_cut() {
+        // Cut 5.0 to 10.0 in a 20s clip.
+        // With PAD_OUT = 0.12, PAD_IN = 0.10:
+        // eff_start = 5.12, eff_end = 9.90.
+        let cuts = vec![(5.0, 10.0)];
+        let keep = calculate_keep_intervals(&cuts, 20.0);
+        assert_eq!(keep.len(), 2);
+        assert!((keep[0].0 - 0.0).abs() < 1e-4);
+        assert!((keep[0].1 - 5.12).abs() < 1e-4);
+        assert!((keep[1].0 - 9.90).abs() < 1e-4);
+        assert!((keep[1].1 - 20.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_calculate_keep_intervals_overlapping_cuts() {
+        // Overlapping cuts: (4.0, 8.0) and (6.0, 12.0) should merge to (4.0, 12.0)
+        let cuts = vec![(4.0, 8.0), (6.0, 12.0)];
+        let keep = calculate_keep_intervals(&cuts, 20.0);
+        assert_eq!(keep.len(), 2);
+        assert!((keep[0].1 - 4.12).abs() < 1e-4);
+        assert!((keep[1].0 - 11.90).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_calculate_keep_intervals_out_of_bounds_and_nan() {
+        let cuts = vec![
+            (-5.0, 2.0),
+            (f64::NAN, 5.0),
+            (10.0, 10.0), // zero length
+            (15.0, 30.0), // beyond total duration 20.0
+        ];
+        let keep = calculate_keep_intervals(&cuts, 20.0);
+        assert!(!keep.is_empty());
+        for &(s, e) in &keep {
+            assert!(s >= 0.0 && e <= 20.0);
+            assert!(e > s);
+        }
+    }
+
+    #[test]
+    fn test_map_original_to_trimmed() {
+        // Kept intervals: [0.0, 5.0] and [10.0, 15.0] (5.0s to 10.0s cut out)
+        let keep = vec![(0.0, 5.0), (10.0, 15.0)];
+
+        // Before cut: mapped 1:1
+        assert_eq!(map_original_to_trimmed(0.0, &keep), 0.0);
+        assert_eq!(map_original_to_trimmed(3.0, &keep), 3.0);
+        assert_eq!(map_original_to_trimmed(5.0, &keep), 5.0);
+
+        // Inside cut: clamped to 5.0
+        assert_eq!(map_original_to_trimmed(6.0, &keep), 5.0);
+        assert_eq!(map_original_to_trimmed(8.0, &keep), 5.0);
+        assert_eq!(map_original_to_trimmed(10.0, &keep), 5.0);
+
+        // After cut: shifts by duration of chunk 1 (5.0)
+        assert_eq!(map_original_to_trimmed(11.0, &keep), 6.0);
+        assert_eq!(map_original_to_trimmed(15.0, &keep), 10.0);
+    }
+
+    #[test]
+    fn test_format_timestamps() {
+        assert_eq!(format_ass_time(0.0), "0:00:00.00");
+        assert_eq!(format_ass_time(65.5), "0:01:05.50");
+        assert_eq!(format_ass_time(3665.25), "1:01:05.25");
+
+        assert_eq!(format_srt_time(0.0), "00:00:00,000");
+        assert_eq!(format_srt_time(65.5), "00:01:05,500");
+        assert_eq!(format_srt_time(3665.25), "01:01:05,250");
+
+        assert_eq!(seconds_to_edl_tc(0.0, 30.0), "00:00:00:00");
+        assert_eq!(seconds_to_edl_tc(1.5, 30.0), "00:00:01:15");
+    }
+
+    #[test]
+    fn test_export_subtitles_srt_skips_cut_phrases() {
+        let temp_dir = std::env::temp_dir();
+        let srt_path = temp_dir.join("test_subcut_skip.srt");
+        let srt_str = srt_path.to_string_lossy().to_string();
+
+        let phrases = vec![
+            Phrase {
+                id: "p1".into(),
+                speaker: "S".into(),
+                start_time: 1.0,
+                end_time: 3.0,
+                text: "Первая фраза".into(),
+                words: vec![],
+            },
+            Phrase {
+                id: "p2".into(),
+                speaker: "S".into(),
+                start_time: 6.0,
+                end_time: 8.0,
+                text: "Вырезанная фраза".into(),
+                words: vec![],
+            },
+            Phrase {
+                id: "p3".into(),
+                speaker: "S".into(),
+                start_time: 11.0,
+                end_time: 13.0,
+                text: "Третья фраза".into(),
+                words: vec![],
+            },
+        ];
+
+        // Cut covers 5.0 to 10.0 entirely (which contains p2)
+        let cuts = vec![(5.0, 10.0)];
+        export_subtitles_srt(&phrases, &cuts, 20.0, &srt_str).unwrap();
+
+        let content = std::fs::read_to_string(&srt_path).unwrap();
+        let _ = std::fs::remove_file(&srt_path);
+
+        assert!(content.contains("Первая фраза"));
+        assert!(!content.contains("Вырезанная фраза"));
+        assert!(content.contains("Третья фраза"));
+    }
+
+    #[test]
+    fn test_calculate_keep_intervals_boundary_cuts() {
+        // Cut at start: 0.0 to 4.0. Should NOT create a 0.0..0.12 sliver.
+        let cuts_start = vec![(0.0, 4.0)];
+        let keep_start = calculate_keep_intervals(&cuts_start, 20.0);
+        assert_eq!(keep_start.len(), 1);
+        assert!((keep_start[0].0 - 3.90).abs() < 1e-4);
+        assert!((keep_start[0].1 - 20.0).abs() < 1e-4);
+
+        // Cut at end: 16.0 to 20.0. Should NOT create a 19.90..20.0 sliver.
+        let cuts_end = vec![(16.0, 20.0)];
+        let keep_end = calculate_keep_intervals(&cuts_end, 20.0);
+        assert_eq!(keep_end.len(), 1);
+        assert!((keep_end[0].0 - 0.0).abs() < 1e-4);
+        assert!((keep_end[0].1 - 16.12).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_format_timestamp_rollover() {
+        assert_eq!(format_ass_time(59.996), "0:01:00.00");
+        assert_eq!(format_srt_time(59.9996), "00:01:00,000");
+        assert_eq!(format_ass_time(3599.996), "1:00:00.00");
+    }
+
+    #[test]
+    fn test_export_project_edl_frame_consistency() {
+        let temp_dir = std::env::temp_dir();
+        let edl_path = temp_dir.join("test_subcut.edl");
+        let edl_str = edl_path.to_string_lossy().to_string();
+
+        let cuts = vec![(4.0, 8.0)];
+        export_project_edl("D:\\test\\sample.mp4", &cuts, 20.0, &edl_str, 30.0).unwrap();
+
+        let content = std::fs::read_to_string(&edl_path).unwrap();
+        let _ = std::fs::remove_file(&edl_path);
+
+        assert!(content.contains("TITLE: SubCut Project"));
+        assert!(content.contains("FROM CLIP NAME: sample.mp4"));
+        assert!(content.contains("001  AX       AA/V  C"));
+        assert!(content.contains("002  AX       AA/V  C"));
+    }
+
+    #[test]
+    fn test_generate_ass_subtitles_hormozi_karaoke() {
+        let temp_dir = std::env::temp_dir();
+        let ass_path = temp_dir.join("test_hormozi.ass");
+        let ass_str = ass_path.to_string_lossy().to_string();
+
+        let phrases = vec![
+            Phrase {
+                id: "p1".into(),
+                speaker: "S".into(),
+                start_time: 1.0,
+                end_time: 2.5,
+                text: "Привет мир".into(),
+                words: vec![
+                    Word { word: "Привет".into(), start_time: 1.0, end_time: 1.5 },
+                    Word { word: "мир".into(), start_time: 1.6, end_time: 2.5 },
+                ],
+            },
+        ];
+
+        let keep = vec![(0.0, 10.0)];
+        generate_ass_subtitles(&phrases, &keep, &ass_str, "hormozi").unwrap();
+
+        let content = std::fs::read_to_string(&ass_path).unwrap();
+        let _ = std::fs::remove_file(&ass_path);
+
+        assert!(content.contains(r"{\k"));
+        assert!(content.contains("ПРИВЕТ"));
+        assert!(content.contains("МИР"));
+    }
 }

@@ -58,7 +58,7 @@ fn get_video_duration(path: &str) -> f64 {
         let stderr = String::from_utf8_lossy(&output.stderr);
         for line in stderr.lines() {
             if let Some(pos) = line.find("Duration:") {
-                let rest = &line[pos + "Duration:".len()..].trim();
+                let rest = line[pos + "Duration:".len()..].trim();
                 let time_str = rest.split(',').next().unwrap_or("").trim();
                 let parts: Vec<&str> = time_str.split(':').collect();
                 if parts.len() == 3 {
@@ -74,7 +74,7 @@ fn get_video_duration(path: &str) -> f64 {
         }
     }
 
-    10.0
+    0.0
 }
 
 #[tauri::command]
@@ -87,21 +87,21 @@ async fn detect_silence_cmd(
         detect_silence(&path, threshold_db, min_duration)
     })
     .await
-    .map_err(|e| format!("Task error: {}", e))?
+    .map_err(|e| format!("Не удалось найти паузы: {}", e))?
 }
 
 #[tauri::command]
 async fn extract_waveform_cmd(path: String, points: usize) -> Result<Vec<u8>, String> {
     tauri::async_runtime::spawn_blocking(move || extract_waveform(&path, points))
         .await
-        .map_err(|e| format!("Task error: {}", e))?
+        .map_err(|e| format!("Не удалось извлечь звуковую дорожку: {}", e))?
 }
 
 #[tauri::command]
 async fn get_video_duration_cmd(path: String) -> Result<f64, String> {
     tauri::async_runtime::spawn_blocking(move || Ok(get_video_duration(&path)))
         .await
-        .map_err(|e| format!("Task error: {}", e))?
+        .map_err(|e| format!("Не удалось определить длительность: {}", e))?
 }
 
 #[tauri::command]
@@ -114,72 +114,86 @@ async fn transcribe_speech_cmd(
     let lang = language.unwrap_or_else(|| "ru".to_string());
     tauri::async_runtime::spawn_blocking(move || ffmpeg::transcribe_speech(&path, &model, &lang))
         .await
-        .map_err(|e| format!("Task error: {}", e))?
+        .map_err(|e| format!("Не удалось распознать речь: {}", e))?
 }
 
 #[tauri::command]
-fn select_video_file_cmd() -> Option<String> {
-    let script = r#"
+async fn select_video_file_cmd() -> Option<String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let script = r#"
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $OutputEncoding = [System.Text.Encoding]::UTF8
 Add-Type -AssemblyName System.Windows.Forms
 $f = New-Object System.Windows.Forms.OpenFileDialog
-$f.Title = "Выберите видео для монтажа в SubCut"
+$f.Title = "Выберите видео"
 $f.Filter = "Видео файлы (*.mp4;*.mov;*.mkv;*.webm)|*.mp4;*.mov;*.mkv;*.webm|Все файлы (*.*)|*.*"
+$f.RestoreDirectory = $true
+$f.Multiselect = $false
 if ($f.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
     [Console]::Out.WriteLine($f.FileName)
 }
 "#;
-    let output = ffmpeg::new_command("powershell")
-        .args(&["-NoProfile", "-Command", script])
-        .output()
-        .ok()?;
+        let output = ffmpeg::new_command("powershell")
+            .args(&["-NoProfile", "-Command", script])
+            .output()
+            .ok()?;
 
-    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if path.is_empty() {
-        None
-    } else {
-        Some(path)
-    }
+        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if path.is_empty() {
+            None
+        } else {
+            Some(path)
+        }
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 #[tauri::command]
-fn select_output_file_cmd(default_name: String) -> Option<String> {
+async fn select_output_file_cmd(default_name: String) -> Option<String> {
     select_save_file_cmd(
-        "Сохранить готовое видео SubCut".to_string(),
+        "Сохранить видео".to_string(),
         "MP4 Видео (*.mp4)|*.mp4".to_string(),
         default_name,
     )
+    .await
 }
 
 #[tauri::command]
-fn select_save_file_cmd(title: String, filter: String, default_name: String) -> Option<String> {
-    let script = format!(
-        r#"
+async fn select_save_file_cmd(title: String, filter: String, default_name: String) -> Option<String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let script = r#"
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $OutputEncoding = [System.Text.Encoding]::UTF8
 Add-Type -AssemblyName System.Windows.Forms
 $f = New-Object System.Windows.Forms.SaveFileDialog
-$f.Title = "{}"
-$f.FileName = "{}"
-$f.Filter = "{}"
-if ($f.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{
+$f.Title = $env:SUBCUT_DIALOG_TITLE
+$f.FileName = $env:SUBCUT_DIALOG_NAME
+$f.Filter = $env:SUBCUT_DIALOG_FILTER
+$f.RestoreDirectory = $true
+if ($f.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
     [Console]::Out.WriteLine($f.FileName)
-}}
-"#,
-        title, default_name, filter
-    );
-    let output = ffmpeg::new_command("powershell")
-        .args(&["-NoProfile", "-Command", &script])
-        .output()
-        .ok()?;
+}
+"#;
+        let output = ffmpeg::new_command("powershell")
+            .args(&["-NoProfile", "-Command", script])
+            .env("SUBCUT_DIALOG_TITLE", &title)
+            .env("SUBCUT_DIALOG_NAME", &default_name)
+            .env("SUBCUT_DIALOG_FILTER", &filter)
+            .output()
+            .ok()?;
 
-    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if path.is_empty() {
-        None
-    } else {
-        Some(path)
-    }
+        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if path.is_empty() {
+            None
+        } else {
+            Some(path)
+        }
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 #[tauri::command]
@@ -206,7 +220,7 @@ async fn export_trimmed_video_cmd(
         )
     })
     .await
-    .map_err(|e| format!("Task error: {}", e))?
+    .map_err(|e| format!("Не удалось смонтировать видео: {}", e))?
 }
 
 #[tauri::command]
@@ -220,7 +234,7 @@ async fn export_subtitles_srt_cmd(
         export_subtitles_srt(&phrases, &cuts, total_duration, &output_path)
     })
     .await
-    .map_err(|e| format!("Task error: {}", e))?
+    .map_err(|e| format!("Не удалось экспортировать субтитры: {}", e))?
 }
 
 #[tauri::command]
@@ -236,7 +250,7 @@ async fn export_project_edl_cmd(
         export_project_edl(&input_path, &cuts, total_duration, &output_path, fps_val)
     })
     .await
-    .map_err(|e| format!("Task error: {}", e))?
+    .map_err(|e| format!("Не удалось экспортировать проект EDL: {}", e))?
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

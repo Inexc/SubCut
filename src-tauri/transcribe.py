@@ -1,6 +1,10 @@
 import sys
 import json
 import os
+import warnings
+
+# Suppress library warnings so stdout remains pure JSON
+warnings.filterwarnings("ignore")
 
 if sys.platform == 'win32':
     try:
@@ -64,6 +68,11 @@ if __name__ == '__main__':
         sys.exit(0)
         
     path = sys.argv[1]
+    if not os.path.exists(path):
+        sys.stderr.write(f'File not found: {path}\n')
+        sys.stdout.buffer.write(b'[]')
+        sys.exit(0)
+
     model_name = sys.argv[2] if len(sys.argv) > 2 and sys.argv[2].strip() else 'base'
     language = sys.argv[3] if len(sys.argv) > 3 and sys.argv[3].strip() else 'ru'
     try:
@@ -73,3 +82,4 @@ if __name__ == '__main__':
     except Exception as e:
         sys.stderr.write(f'Whisper error: {e}\n')
         sys.stdout.buffer.write(b'[]')
+        sys.exit(1)
