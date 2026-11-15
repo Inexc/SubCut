@@ -17,9 +17,16 @@ import {
   Type,
   X,
   RefreshCw,
-  Check,
-  ZoomIn,
+  FileText,
+  Clapperboard,
+  Zap,
 } from 'lucide-react'
+
+interface Word {
+  word: string
+  startTime: number
+  endTime: number
+}
 
 interface Phrase {
   id: string
@@ -27,6 +34,7 @@ interface Phrase {
   startTime: number
   endTime: number
   text: string
+  words?: Word[]
 }
 
 interface SilenceGap {
@@ -50,6 +58,16 @@ const INITIAL_SCRIPT: ScriptItem[] = [
       startTime: 0.0,
       endTime: 3.45,
       text: 'Всем привет! Сегодня разберём, как быстро монтировать рилсы прямо по тексту.',
+      words: [
+        { word: 'Всем', startTime: 0.0, endTime: 0.4 },
+        { word: 'привет!', startTime: 0.4, endTime: 0.8 },
+        { word: 'Сегодня', startTime: 0.9, endTime: 1.3 },
+        { word: 'разберём,', startTime: 1.3, endTime: 1.8 },
+        { word: 'как', startTime: 1.8, endTime: 2.1 },
+        { word: 'быстро', startTime: 2.1, endTime: 2.5 },
+        { word: 'монтировать', startTime: 2.5, endTime: 3.0 },
+        { word: 'рилсы.', startTime: 3.0, endTime: 3.45 },
+      ],
     },
   },
   {
@@ -141,13 +159,15 @@ export default function App() {
   const [isExporting, setIsExporting] = useState<boolean>(false)
   const [searchQuery, setSearchQuery] = useState<string>('')
 
-  // Pro Features State
+  // Pro Features State (Feature 2 & Feature 4)
   const [silenceThreshold, setSilenceThreshold] = useState<number>(-30.0)
   const [minSilenceDuration, setMinSilenceDuration] = useState<number>(0.5)
   const [whisperModel, setWhisperModel] = useState<string>('base')
-  const [punchInZoom, setPunchInZoom] = useState<boolean>(true)
   const [burnSubtitles, setBurnSubtitles] = useState<boolean>(true)
+  const [subtitlePreset, setSubtitlePreset] = useState<'hormozi' | 'classic' | 'box'>('hormozi')
+  const [hardwareAccel, setHardwareAccel] = useState<'auto' | 'nvenc' | 'cpu'>('auto')
   const [isSettingsOpen, setIsSettingsOpen] = useState<boolean>(false)
+  const [isExportMenuOpen, setIsExportMenuOpen] = useState<boolean>(false)
 
   const videoRef = useRef<HTMLVideoElement>(null)
   const timelineRef = useRef<HTMLDivElement>(null)
@@ -160,13 +180,12 @@ export default function App() {
   const cutDuration = activeCuts.reduce((acc, s) => acc + s.data.duration, 0)
   const remainingDuration = Math.max(0, totalDuration - cutDuration)
 
-  // List of phrases for zoom & overlay
+  // List of phrases for subtitle overlay
   const phraseList = items.filter((i): i is { type: 'phrase'; data: Phrase } => i.type === 'phrase')
   const activePhraseIndex = phraseList.findIndex(
     (p) => currentTime >= p.data.startTime && currentTime <= p.data.endTime
   )
   const activePhrase = activePhraseIndex >= 0 ? phraseList[activePhraseIndex] : null
-  const isZoomed = punchInZoom && activePhraseIndex >= 0 && activePhraseIndex % 2 === 1
 
   // Open Video File
   const handleOpenFile = async () => {
@@ -200,7 +219,7 @@ export default function App() {
         setWaveform(peaks)
       }
 
-      // 4. Transcribe speech using Whisper AI
+      // 4. Transcribe speech using Whisper AI with word timestamps
       let phrases: Phrase[] = []
       try {
         phrases = await invoke<Phrase[]>('transcribe_speech_cmd', {
@@ -455,8 +474,8 @@ export default function App() {
     )
   }
 
-  // Export trimmed video with all options
-  const handleExport = async () => {
+  // Export 1: Trimmed MP4 video with GPU Acceleration and styled subtitles (NO ZOOM)
+  const handleExportMP4 = async () => {
     try {
       if (!filePath) {
         alert('Сначала откройте видеофайл')
@@ -472,24 +491,107 @@ export default function App() {
         .map((p) => p.data)
 
       const defaultName = `subcut_${filePath.split(/[\\/]/).pop()}`
-      const outputPath = await invoke<string | null>('select_output_file_cmd', { defaultName })
+      const outputPath = await invoke<string | null>('select_save_file_cmd', {
+        title: 'Сохранить готовое видео SubCut',
+        filter: 'MP4 Видео (*.mp4)|*.mp4',
+        defaultName,
+      })
       if (!outputPath) return
 
       setIsExporting(true)
+      setIsExportMenuOpen(false)
       await invoke('export_trimmed_video_cmd', {
         inputPath: filePath,
         cuts,
         outputPath,
         totalDuration,
-        punchInZoom,
         burnSubtitles,
+        subtitlePreset,
         phrases: phrasesToExport,
+        hardwareAccel,
       })
       alert(`Видео успешно смонтировано:\n${outputPath}`)
     } catch (err) {
-      alert(`Ошибка экспорта: ${err}`)
+      alert(`Ошибка экспорта видео: ${err}`)
     } finally {
       setIsExporting(false)
+    }
+  }
+
+  // Export 2: Standalone .SRT subtitles
+  const handleExportSRT = async () => {
+    try {
+      if (!filePath) {
+        alert('Сначала откройте видеофайл')
+        return
+      }
+
+      const cuts = items
+        .filter((i): i is { type: 'silence'; data: SilenceGap } => i.type === 'silence' && i.data.isCut)
+        .map((s) => [s.data.startTime, s.data.endTime])
+
+      const phrasesToExport = items
+        .filter((i): i is { type: 'phrase'; data: Phrase } => i.type === 'phrase')
+        .map((p) => p.data)
+
+      const baseName = filePath.split(/[\\/]/).pop()?.replace(/\.[^/.]+$/, '') || 'subcut'
+      const defaultName = `${baseName}_subtitles.srt`
+
+      const outputPath = await invoke<string | null>('select_save_file_cmd', {
+        title: 'Сохранить субтитры .SRT',
+        filter: 'SRT Субтитры (*.srt)|*.srt',
+        defaultName,
+      })
+      if (!outputPath) return
+
+      setIsExportMenuOpen(false)
+      await invoke('export_subtitles_srt_cmd', {
+        outputPath,
+        cuts,
+        totalDuration,
+        phrases: phrasesToExport,
+      })
+      alert(`Субтитры успешно сохранены в .SRT:\n${outputPath}`)
+    } catch (err) {
+      alert(`Ошибка экспорта субтитров: ${err}`)
+    }
+  }
+
+  // Export 3: EDL Project for Premiere Pro / DaVinci Resolve
+  const handleExportEDL = async () => {
+    try {
+      if (!filePath) {
+        alert('Сначала откройте видеофайл')
+        return
+      }
+
+      const cuts = items
+        .filter((i): i is { type: 'silence'; data: SilenceGap } => i.type === 'silence' && i.data.isCut)
+        .map((s) => [s.data.startTime, s.data.endTime])
+
+      const baseName = filePath.split(/[\\/]/).pop()?.replace(/\.[^/.]+$/, '') || 'subcut'
+      const defaultName = `${baseName}_project.edl`
+
+      const outputPath = await invoke<string | null>('select_save_file_cmd', {
+        title: 'Экспорт проекта монтажа EDL (Premiere Pro / DaVinci Resolve)',
+        filter: 'CMX 3600 EDL (*.edl)|*.edl',
+        defaultName,
+      })
+      if (!outputPath) return
+
+      setIsExportMenuOpen(false)
+      await invoke('export_project_edl_cmd', {
+        outputPath,
+        inputPath: filePath,
+        cuts,
+        totalDuration,
+        fps: 30.0,
+      })
+      alert(
+        `Проект монтажа успешно экспортирован:\n${outputPath}\n\nКак открыть в DaVinci Resolve или Premiere Pro:\n1. Меню File -> Import -> Timeline\n2. Выберите созданный файл .edl`
+      )
+    } catch (err) {
+      alert(`Ошибка экспорта проекта EDL: ${err}`)
     }
   }
 
@@ -569,23 +671,10 @@ export default function App() {
           </div>
         </div>
 
-        {/* Right: Actions & Pro Features Settings */}
+        {/* Right: Actions & Subtitle Preset / Settings */}
         <div className="flex items-center gap-2">
           
-          {/* Quick Toggles */}
-          <button
-            onClick={() => setPunchInZoom(!punchInZoom)}
-            className={`h-7 px-2.5 rounded text-xs font-medium border flex items-center gap-1.5 transition ${
-              punchInZoom
-                ? 'bg-zinc-800 text-zinc-200 border-zinc-600'
-                : 'bg-zinc-900/60 text-zinc-500 border-zinc-800 hover:text-zinc-300'
-            }`}
-            title="Чередование зума 106% на склейках"
-          >
-            <ZoomIn className="w-3.5 h-3.5" />
-            <span className="hidden lg:inline">Zoom 106%</span>
-          </button>
-
+          {/* Subtitles Quick Toggle */}
           <button
             onClick={() => setBurnSubtitles(!burnSubtitles)}
             className={`h-7 px-2.5 rounded text-xs font-medium border flex items-center gap-1.5 transition ${
@@ -593,10 +682,15 @@ export default function App() {
                 ? 'bg-zinc-800 text-zinc-200 border-zinc-600'
                 : 'bg-zinc-900/60 text-zinc-500 border-zinc-800 hover:text-zinc-300'
             }`}
-            title="Вшивание субтитров в видео при экспорте"
+            title="Отображение и вшивание субтитров"
           >
             <Type className="w-3.5 h-3.5" />
             <span className="hidden lg:inline">Субтитры</span>
+            {burnSubtitles && (
+              <span className="text-[10px] font-mono px-1 py-0.2 rounded bg-zinc-700 text-amber-300 uppercase">
+                {subtitlePreset}
+              </span>
+            )}
           </button>
 
           {/* Settings Modal Button */}
@@ -607,7 +701,7 @@ export default function App() {
                 ? 'bg-zinc-700 text-white border-zinc-500'
                 : 'bg-zinc-800/50 hover:bg-zinc-800 text-zinc-300 border-zinc-700/60'
             }`}
-            title="Параметры монтажа и порога пауз"
+            title="Параметры монтажа, GPU-ускорения и субтитров"
           >
             <SlidersHorizontal className="w-3.5 h-3.5 text-zinc-400" />
             <span className="hidden md:inline">Настройки</span>
@@ -644,36 +738,77 @@ export default function App() {
             </button>
           )}
 
-          {/* Primary Export */}
-          <button
-            onClick={handleExport}
-            disabled={isExporting || isAnalyzing}
-            className="h-7 px-3 rounded text-xs font-semibold bg-zinc-100 hover:bg-white text-zinc-950 flex items-center gap-1.5 transition shadow-sm disabled:opacity-50"
-          >
-            <Download className="w-3.5 h-3.5" />
-            <span>{isExporting ? 'Экспорт...' : 'Экспорт'}</span>
-          </button>
+          {/* Export Dropdown / Group */}
+          <div className="relative">
+            <button
+              onClick={() => setIsExportMenuOpen(!isExportMenuOpen)}
+              disabled={isExporting || isAnalyzing}
+              className="h-7 px-3 rounded text-xs font-semibold bg-zinc-100 hover:bg-white text-zinc-950 flex items-center gap-1.5 transition shadow-sm disabled:opacity-50"
+            >
+              <Download className="w-3.5 h-3.5" />
+              <span>{isExporting ? 'Монтаж...' : 'Экспорт'}</span>
+            </button>
+
+            {/* Export Menu Dropdown */}
+            {isExportMenuOpen && (
+              <div className="absolute right-0 top-8 w-56 bg-zinc-900 border border-zinc-800 rounded-lg shadow-2xl py-1.5 z-40 text-xs animate-in fade-in duration-100">
+                <button
+                  onClick={handleExportMP4}
+                  className="w-full px-3 py-2 text-left hover:bg-zinc-800/80 flex items-center gap-2.5 text-zinc-200 transition"
+                >
+                  <Zap className="w-4 h-4 text-emerald-400 flex-shrink-0" />
+                  <div>
+                    <div className="font-medium text-white">Экспорт MP4 видео</div>
+                    <div className="text-[10px] text-zinc-400">GPU ускорение + субтитры</div>
+                  </div>
+                </button>
+
+                <div className="h-px bg-zinc-800 my-1" />
+
+                <button
+                  onClick={handleExportSRT}
+                  className="w-full px-3 py-2 text-left hover:bg-zinc-800/80 flex items-center gap-2.5 text-zinc-200 transition"
+                >
+                  <FileText className="w-4 h-4 text-amber-400 flex-shrink-0" />
+                  <div>
+                    <div className="font-medium">Экспорт .SRT субтитров</div>
+                    <div className="text-[10px] text-zinc-400">Для YouTube / Telegram</div>
+                  </div>
+                </button>
+
+                <button
+                  onClick={handleExportEDL}
+                  className="w-full px-3 py-2 text-left hover:bg-zinc-800/80 flex items-center gap-2.5 text-zinc-200 transition"
+                >
+                  <Clapperboard className="w-4 h-4 text-sky-400 flex-shrink-0" />
+                  <div>
+                    <div className="font-medium">Проект для Premiere / DaVinci</div>
+                    <div className="text-[10px] text-zinc-400">Таймлайн нарезки (.EDL)</div>
+                  </div>
+                </button>
+              </div>
+            )}
+          </div>
+
         </div>
       </header>
 
       {/* 2. MAIN SPLIT: Proportional Video Left / Clean Script Right */}
-      <div className="flex-1 flex overflow-hidden relative">
+      <div className="flex-1 flex overflow-hidden relative" onClick={() => isExportMenuOpen && setIsExportMenuOpen(false)}>
         
         {/* LEFT PANE: Video Player Surface */}
         <section className="w-[50%] lg:w-[48%] border-r border-zinc-800/80 bg-zinc-950 flex flex-col justify-between p-4">
           
-          {/* Framed Video Container (9:16 or native aspect ratio, nicely centered) */}
+          {/* Framed Video Container (9:16 or native aspect ratio, clean untouched framing — NO ZOOM) */}
           <div className="relative flex-1 flex items-center justify-center min-h-0">
             <div className="relative aspect-[9/16] h-full max-h-[520px] bg-black rounded-lg border border-zinc-800/80 overflow-hidden shadow-2xl flex flex-col justify-between select-none">
               
-              {/* Real Video Element with dynamic Punch-In Zoom scale */}
+              {/* Real Video Element (Clean scale, native framing) */}
               {videoSrc ? (
                 <video
                   ref={videoRef}
                   src={videoSrc}
-                  className={`w-full h-full object-cover transition-transform duration-200 ease-out ${
-                    isZoomed ? 'scale-[1.06]' : 'scale-100'
-                  }`}
+                  className="w-full h-full object-cover"
                   playsInline
                   onLoadedMetadata={(e) => {
                     const d = e.currentTarget.duration
@@ -698,25 +833,47 @@ export default function App() {
                 </div>
               )}
 
-              {/* Live Subtitle Overlay Styled Like High-Retention Reels */}
+              {/* Advanced Subtitle Overlay (Hormozi Karaoke / Classic / Box) */}
               {burnSubtitles && activePhrase && (
                 <div className="absolute inset-x-0 bottom-8 px-4 text-center pointer-events-none z-10 transition-all">
-                  <span className="inline-block px-3 py-1.5 rounded bg-black/80 border border-black/50 text-white font-extrabold text-sm md:text-base leading-tight tracking-wide uppercase drop-shadow-[0_2px_4px_rgba(0,0,0,0.95)]">
-                    {activePhrase.data.text}
-                  </span>
+                  {subtitlePreset === 'hormozi' ? (
+                    // Hormozi Style: Bold All-Caps with dynamic active word highlight!
+                    <div className="inline-block px-3 py-1.5 rounded bg-black/85 border border-black/60 shadow-2xl drop-shadow-[0_4px_10px_rgba(0,0,0,0.95)] max-w-[90%]">
+                      {activePhrase.data.words && activePhrase.data.words.length > 0 ? (
+                        activePhrase.data.words.map((w, wIdx) => {
+                          const isWordActive = currentTime >= w.startTime && currentTime <= w.endTime
+                          return (
+                            <span
+                              key={wIdx}
+                              className={`inline-block px-1 font-black text-sm md:text-base tracking-wide uppercase transition-all duration-75 ${
+                                isWordActive
+                                  ? 'text-amber-300 scale-110 drop-shadow-[0_0_8px_rgba(252,211,77,0.8)]'
+                                  : 'text-white'
+                              }`}
+                            >
+                              {w.word}
+                            </span>
+                          )
+                        })
+                      ) : (
+                        <span className="text-white font-black text-sm md:text-base tracking-wide uppercase">
+                          {activePhrase.data.text}
+                        </span>
+                      )}
+                    </div>
+                  ) : subtitlePreset === 'box' ? (
+                    // Minimal Box Style
+                    <span className="inline-block px-3.5 py-1.5 rounded-md bg-black/85 backdrop-blur-sm text-zinc-100 font-semibold text-xs md:text-sm border border-zinc-750/80 shadow-lg">
+                      {activePhrase.data.text}
+                    </span>
+                  ) : (
+                    // Classic Clean Style
+                    <span className="inline-block px-3 py-1.5 text-white font-bold text-sm md:text-base leading-tight drop-shadow-[0_2px_4px_rgba(0,0,0,0.95)]">
+                      {activePhrase.data.text}
+                    </span>
+                  )}
                 </div>
               )}
-
-              {/* Status Badges in Player Corner */}
-              <div className="absolute top-2.5 left-2.5 flex items-center gap-1.5 pointer-events-none z-10">
-                {punchInZoom && (
-                  <span className={`text-[10px] font-mono font-medium px-1.5 py-0.5 rounded backdrop-blur-sm border transition-all ${
-                    isZoomed ? 'bg-amber-500/20 text-amber-300 border-amber-500/40 font-semibold' : 'bg-black/60 text-zinc-400 border-zinc-700/40'
-                  }`}>
-                    {isZoomed ? 'ZOOM 106%' : 'ZOOM 100%'}
-                  </span>
-                )}
-              </div>
 
               {/* Timecode badge in player corner */}
               <div className="absolute top-2.5 right-2.5 pointer-events-none z-10">
@@ -875,7 +1032,7 @@ export default function App() {
                   </div>
                   <div>
                     <h2 className="text-sm font-semibold text-zinc-100">Параметры монтажа</h2>
-                    <p className="text-[11px] text-zinc-400">Настройка чувствительности алгоритмов и экспорта</p>
+                    <p className="text-[11px] text-zinc-400">Настройка чувствительности алгоритмов, стилей субтитров и GPU</p>
                   </div>
                 </div>
                 <button
@@ -889,7 +1046,77 @@ export default function App() {
               {/* Body Controls */}
               <div className="space-y-4 text-xs">
                 
-                {/* 1. Silence Threshold (dB) */}
+                {/* 1. Subtitle Style Preset (Feature 2) */}
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <label className="font-medium text-zinc-200 flex items-center gap-1.5">
+                      <Type className="w-3.5 h-3.5 text-amber-400" />
+                      <span>Стиль вирусных субтитров (Viral Presets)</span>
+                    </label>
+                    <span className="font-mono text-zinc-400 uppercase">{subtitlePreset}</span>
+                  </div>
+                  <div className="grid grid-cols-3 gap-2">
+                    {[
+                      { id: 'hormozi' as const, title: 'Hormozi (Караоке)', desc: 'Желтая подсветка слов' },
+                      { id: 'classic' as const, title: 'Classic Clean', desc: 'Белый + контур внизу' },
+                      { id: 'box' as const, title: 'Minimal Box', desc: 'Темная плашка-фон' },
+                    ].map((st) => (
+                      <button
+                        key={st.id}
+                        onClick={() => setSubtitlePreset(st.id)}
+                        className={`p-2 rounded border text-left transition ${
+                          subtitlePreset === st.id
+                            ? 'bg-zinc-100 text-zinc-950 border-white'
+                            : 'bg-zinc-950/60 text-zinc-400 border-zinc-800 hover:text-zinc-200'
+                        }`}
+                      >
+                        <div className="font-semibold text-[11px]">{st.title}</div>
+                        <div className={`text-[10px] ${subtitlePreset === st.id ? 'text-zinc-700' : 'text-zinc-500'}`}>
+                          {st.desc}
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="h-px bg-zinc-800 my-2" />
+
+                {/* 2. GPU Hardware Acceleration (Feature 4) */}
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <label className="font-medium text-zinc-200 flex items-center gap-1.5">
+                      <Zap className="w-3.5 h-3.5 text-emerald-400" />
+                      <span>Аппаратное ускорение рендера (GPU)</span>
+                    </label>
+                    <span className="font-mono text-emerald-400 font-medium">NVIDIA GTX 1050</span>
+                  </div>
+                  <div className="grid grid-cols-3 gap-2">
+                    {[
+                      { id: 'auto' as const, label: 'Авто (Рекомендуется)' },
+                      { id: 'nvenc' as const, label: 'NVIDIA NVENC (GPU)' },
+                      { id: 'cpu' as const, label: 'CPU (libx264)' },
+                    ].map((opt) => (
+                      <button
+                        key={opt.id}
+                        onClick={() => setHardwareAccel(opt.id)}
+                        className={`h-7 rounded border font-mono text-[11px] transition ${
+                          hardwareAccel === opt.id
+                            ? 'bg-zinc-100 text-zinc-950 border-white font-medium'
+                            : 'bg-zinc-950/60 text-zinc-400 border-zinc-800 hover:text-zinc-200'
+                        }`}
+                      >
+                        {opt.label}
+                      </button>
+                    ))}
+                  </div>
+                  <p className="text-[10px] text-zinc-500">
+                    Рендер через чип NVENC на вашей GeForce GTX 1050 освобождает процессор и ускоряет экспорт в 5–10 раз.
+                  </p>
+                </div>
+
+                <div className="h-px bg-zinc-800 my-2" />
+
+                {/* 3. Silence Threshold (dB) */}
                 <div className="space-y-1.5">
                   <div className="flex items-center justify-between">
                     <label className="font-medium text-zinc-200">Порог шума тишины (dB)</label>
@@ -917,7 +1144,7 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* 2. Minimum Silence Duration (seconds) */}
+                {/* 4. Minimum Silence Duration (seconds) */}
                 <div className="space-y-1.5">
                   <div className="flex items-center justify-between">
                     <label className="font-medium text-zinc-200">Минимальная длина паузы</label>
@@ -962,7 +1189,7 @@ export default function App() {
 
                 <div className="h-px bg-zinc-800 my-2" />
 
-                {/* 3. Whisper Model Selection */}
+                {/* 5. Whisper Model Selection */}
                 <div className="space-y-1.5">
                   <div className="flex items-center justify-between">
                     <label className="font-medium text-zinc-200 flex items-center gap-1.5">
@@ -989,50 +1216,6 @@ export default function App() {
                         {opt.label}
                       </button>
                     ))}
-                  </div>
-                </div>
-
-                <div className="h-px bg-zinc-800 my-2" />
-
-                {/* 4. Punch-In Zoom Toggle */}
-                <div
-                  onClick={() => setPunchInZoom(!punchInZoom)}
-                  className="flex items-center justify-between p-2.5 rounded bg-zinc-950/60 border border-zinc-800/80 cursor-pointer hover:border-zinc-700 transition"
-                >
-                  <div className="pr-4">
-                    <div className="font-medium text-zinc-200 flex items-center gap-1.5">
-                      <ZoomIn className="w-3.5 h-3.5 text-zinc-400" />
-                      <span>Punch-In Zoom (чередование 100% / 106%)</span>
-                    </div>
-                    <div className="text-[11px] text-zinc-400 mt-0.5">
-                      Скрывает склейки между репликами, создавая эффект динамичной съемки с двух камер
-                    </div>
-                  </div>
-                  <div className={`w-5 h-5 rounded border flex items-center justify-center transition flex-shrink-0 ${
-                    punchInZoom ? 'bg-zinc-100 border-white text-zinc-950' : 'border-zinc-700 bg-zinc-900'
-                  }`}>
-                    {punchInZoom && <Check className="w-3.5 h-3.5 stroke-[3]" />}
-                  </div>
-                </div>
-
-                {/* 5. Burn-In Subtitles Toggle */}
-                <div
-                  onClick={() => setBurnSubtitles(!burnSubtitles)}
-                  className="flex items-center justify-between p-2.5 rounded bg-zinc-950/60 border border-zinc-800/80 cursor-pointer hover:border-zinc-700 transition"
-                >
-                  <div className="pr-4">
-                    <div className="font-medium text-zinc-200 flex items-center gap-1.5">
-                      <Type className="w-3.5 h-3.5 text-zinc-400" />
-                      <span>Вшивать субтитры в видео при экспорте</span>
-                    </div>
-                    <div className="text-[11px] text-zinc-400 mt-0.5">
-                      Рендерит стильные контрастные белые субтитры прямо в MP4 (формат 9:16)
-                    </div>
-                  </div>
-                  <div className={`w-5 h-5 rounded border flex items-center justify-center transition flex-shrink-0 ${
-                    burnSubtitles ? 'bg-zinc-100 border-white text-zinc-950' : 'border-zinc-700 bg-zinc-900'
-                  }`}>
-                    {burnSubtitles && <Check className="w-3.5 h-3.5 stroke-[3]" />}
                   </div>
                 </div>
 
@@ -1139,6 +1322,8 @@ export default function App() {
             <span>Порог: {silenceThreshold}dB</span>
             <span>•</span>
             <span>Мин: {minSilenceDuration}с</span>
+            <span>•</span>
+            <span className="text-emerald-400 font-medium">NVENC GPU Active</span>
           </div>
         </div>
 

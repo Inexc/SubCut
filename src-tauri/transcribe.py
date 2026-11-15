@@ -11,21 +11,32 @@ if sys.platform == 'win32':
 
 def transcribe(video_path, model_name='base'):
     import faster_whisper
-    # Use selected model (e.g. tiny, base, small) with INT8 quantization on CPU
+    # Use selected model (e.g. tiny, base, small) with INT8 quantization and word-level timestamps
     model = faster_whisper.WhisperModel(model_name, device='cpu', compute_type='int8')
-    segments, info = model.transcribe(video_path, beam_size=1)
+    segments, info = model.transcribe(video_path, beam_size=1, word_timestamps=True)
     
     results = []
     idx = 1
     for s in segments:
         text = s.text.strip()
         if text:
+            words = []
+            if s.words:
+                for w in s.words:
+                    clean_w = w.word.strip()
+                    if clean_w:
+                        words.append({
+                            'word': clean_w,
+                            'startTime': round(w.start, 2),
+                            'endTime': round(w.end, 2)
+                        })
             results.append({
                 'id': f'p-{idx}',
                 'speaker': 'Спикер',
                 'startTime': round(s.start, 2),
                 'endTime': round(s.end, 2),
-                'text': text
+                'text': text,
+                'words': words
             })
             idx += 1
             

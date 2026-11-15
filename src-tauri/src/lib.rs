@@ -1,6 +1,9 @@
 mod ffmpeg;
 
-use ffmpeg::{detect_silence, export_trimmed_video, extract_waveform, Phrase, SilenceGap};
+use ffmpeg::{
+    detect_silence, export_project_edl, export_subtitles_srt, export_trimmed_video,
+    extract_waveform, Phrase, SilenceGap,
+};
 use std::process::Command;
 
 #[tauri::command]
@@ -87,7 +90,6 @@ fn get_video_duration_cmd(path: String) -> Result<f64, String> {
         }
     }
 
-    // Fallback safe duration
     Ok(10.0)
 }
 
@@ -128,20 +130,29 @@ if ($f.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
 
 #[tauri::command]
 fn select_output_file_cmd(default_name: String) -> Option<String> {
+    select_save_file_cmd(
+        "Сохранить готовое видео SubCut".to_string(),
+        "MP4 Видео (*.mp4)|*.mp4".to_string(),
+        default_name,
+    )
+}
+
+#[tauri::command]
+fn select_save_file_cmd(title: String, filter: String, default_name: String) -> Option<String> {
     let script = format!(
         r#"
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $OutputEncoding = [System.Text.Encoding]::UTF8
 Add-Type -AssemblyName System.Windows.Forms
 $f = New-Object System.Windows.Forms.SaveFileDialog
-$f.Title = "Сохранить готовое видео SubCut"
+$f.Title = "{}"
 $f.FileName = "{}"
-$f.Filter = "MP4 Видео (*.mp4)|*.mp4"
+$f.Filter = "{}"
 if ($f.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{
     [Console]::Out.WriteLine($f.FileName)
 }}
 "#,
-        default_name
+        title, default_name, filter
     );
     let output = Command::new("powershell")
         .args(&["-NoProfile", "-Command", &script])
@@ -162,19 +173,43 @@ fn export_trimmed_video_cmd(
     cuts: Vec<(f64, f64)>,
     output_path: String,
     total_duration: f64,
-    punch_in_zoom: bool,
     burn_subtitles: bool,
+    subtitle_preset: String,
     phrases: Vec<Phrase>,
+    hardware_accel: String,
 ) -> Result<(), String> {
     export_trimmed_video(
         &input_path,
         &cuts,
         &output_path,
         total_duration,
-        punch_in_zoom,
         burn_subtitles,
+        &subtitle_preset,
         &phrases,
+        &hardware_accel,
     )
+}
+
+#[tauri::command]
+fn export_subtitles_srt_cmd(
+    output_path: String,
+    cuts: Vec<(f64, f64)>,
+    total_duration: f64,
+    phrases: Vec<Phrase>,
+) -> Result<(), String> {
+    export_subtitles_srt(&phrases, &cuts, total_duration, &output_path)
+}
+
+#[tauri::command]
+fn export_project_edl_cmd(
+    output_path: String,
+    input_path: String,
+    cuts: Vec<(f64, f64)>,
+    total_duration: f64,
+    fps: Option<f64>,
+) -> Result<(), String> {
+    let fps_val = fps.unwrap_or(30.0);
+    export_project_edl(&input_path, &cuts, total_duration, &output_path, fps_val)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -188,7 +223,10 @@ pub fn run() {
             transcribe_speech_cmd,
             select_video_file_cmd,
             select_output_file_cmd,
-            export_trimmed_video_cmd
+            select_save_file_cmd,
+            export_trimmed_video_cmd,
+            export_subtitles_srt_cmd,
+            export_project_edl_cmd
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
