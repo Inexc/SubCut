@@ -1,6 +1,6 @@
 mod ffmpeg;
 
-use ffmpeg::{detect_silence, export_trimmed_video, extract_waveform, SilenceGap};
+use ffmpeg::{detect_silence, export_trimmed_video, extract_waveform, Phrase, SilenceGap};
 use std::process::Command;
 
 #[tauri::command]
@@ -92,8 +92,12 @@ fn get_video_duration_cmd(path: String) -> Result<f64, String> {
 }
 
 #[tauri::command]
-fn transcribe_speech_cmd(path: String) -> Result<Vec<ffmpeg::Phrase>, String> {
-    ffmpeg::transcribe_speech(&path)
+fn transcribe_speech_cmd(
+    path: String,
+    model_size: Option<String>,
+) -> Result<Vec<Phrase>, String> {
+    let model = model_size.unwrap_or_else(|| "base".to_string());
+    ffmpeg::transcribe_speech(&path, &model)
 }
 
 #[tauri::command]
@@ -158,8 +162,19 @@ fn export_trimmed_video_cmd(
     cuts: Vec<(f64, f64)>,
     output_path: String,
     total_duration: f64,
+    punch_in_zoom: bool,
+    burn_subtitles: bool,
+    phrases: Vec<Phrase>,
 ) -> Result<(), String> {
-    export_trimmed_video(&input_path, &cuts, &output_path, total_duration)
+    export_trimmed_video(
+        &input_path,
+        &cuts,
+        &output_path,
+        total_duration,
+        punch_in_zoom,
+        burn_subtitles,
+        &phrases,
+    )
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

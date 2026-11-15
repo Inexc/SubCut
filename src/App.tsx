@@ -12,6 +12,13 @@ import {
   FolderOpen,
   RotateCcw,
   Search,
+  SlidersHorizontal,
+  Sparkles,
+  Type,
+  X,
+  RefreshCw,
+  Check,
+  ZoomIn,
 } from 'lucide-react'
 
 interface Phrase {
@@ -134,6 +141,14 @@ export default function App() {
   const [isExporting, setIsExporting] = useState<boolean>(false)
   const [searchQuery, setSearchQuery] = useState<string>('')
 
+  // Pro Features State
+  const [silenceThreshold, setSilenceThreshold] = useState<number>(-30.0)
+  const [minSilenceDuration, setMinSilenceDuration] = useState<number>(0.5)
+  const [whisperModel, setWhisperModel] = useState<string>('base')
+  const [punchInZoom, setPunchInZoom] = useState<boolean>(true)
+  const [burnSubtitles, setBurnSubtitles] = useState<boolean>(true)
+  const [isSettingsOpen, setIsSettingsOpen] = useState<boolean>(false)
+
   const videoRef = useRef<HTMLVideoElement>(null)
   const timelineRef = useRef<HTMLDivElement>(null)
   const isSkippingRef = useRef<boolean>(false)
@@ -145,13 +160,13 @@ export default function App() {
   const cutDuration = activeCuts.reduce((acc, s) => acc + s.data.duration, 0)
   const remainingDuration = Math.max(0, totalDuration - cutDuration)
 
-  // Find active phrase for subtitle overlay
-  const activePhrase = items.find(
-    (item): item is { type: 'phrase'; data: Phrase } =>
-      item.type === 'phrase' &&
-      currentTime >= item.data.startTime &&
-      currentTime <= item.data.endTime
+  // List of phrases for zoom & overlay
+  const phraseList = items.filter((i): i is { type: 'phrase'; data: Phrase } => i.type === 'phrase')
+  const activePhraseIndex = phraseList.findIndex(
+    (p) => currentTime >= p.data.startTime && currentTime <= p.data.endTime
   )
+  const activePhrase = activePhraseIndex >= 0 ? phraseList[activePhraseIndex] : null
+  const isZoomed = punchInZoom && activePhraseIndex >= 0 && activePhraseIndex % 2 === 1
 
   // Open Video File
   const handleOpenFile = async () => {
@@ -172,8 +187,8 @@ export default function App() {
       // 2. Detect pauses via FFmpeg
       const detectedGaps = await invoke<SilenceGap[]>('detect_silence_cmd', {
         path: selected,
-        thresholdDb: -30.0,
-        minDuration: 0.5,
+        thresholdDb: silenceThreshold,
+        minDuration: minSilenceDuration,
       })
 
       // 3. Extract real waveform peaks
@@ -188,7 +203,10 @@ export default function App() {
       // 4. Transcribe speech using Whisper AI
       let phrases: Phrase[] = []
       try {
-        phrases = await invoke<Phrase[]>('transcribe_speech_cmd', { path: selected })
+        phrases = await invoke<Phrase[]>('transcribe_speech_cmd', {
+          path: selected,
+          modelSize: whisperModel,
+        })
       } catch (wErr) {
         console.warn('Whisper transcription error:', wErr)
       }
@@ -253,6 +271,79 @@ export default function App() {
     }
   }
 
+  // Recalculate silences when threshold or min duration changed
+  const handleRecalculateSilences = async () => {
+    if (!filePath) return
+    try {
+      setIsAnalyzing(true)
+      const detectedGaps = await invoke<SilenceGap[]>('detect_silence_cmd', {
+        path: filePath,
+        thresholdDb: silenceThreshold,
+        minDuration: minSilenceDuration,
+      })
+
+      // Keep user edited phrases
+      const currentPhrases = items
+        .filter((i): i is { type: 'phrase'; data: Phrase } => i.type === 'phrase')
+        .map((p) => p.data)
+
+      const allEvents: { time: number; item: ScriptItem }[] = []
+      detectedGaps.forEach((gap) => {
+        allEvents.push({ time: gap.startTime, item: { type: 'silence', data: gap } })
+      })
+
+      if (currentPhrases.length > 0) {
+        currentPhrases.forEach((phrase) => {
+          allEvents.push({ time: phrase.startTime, item: { type: 'phrase', data: phrase } })
+        })
+      } else {
+        let cur = 0
+        detectedGaps.forEach((gap, idx) => {
+          if (gap.startTime > cur + 0.1) {
+            allEvents.push({
+              time: cur,
+              item: {
+                type: 'phrase',
+                data: {
+                  id: `p-${idx + 1}`,
+                  speaker: 'Спикер',
+                  startTime: cur,
+                  endTime: gap.startTime,
+                  text: `Речь спикера (фрагмент ${idx + 1})`,
+                },
+              },
+            })
+          }
+          cur = gap.endTime
+        })
+        if (cur < totalDuration - 0.1) {
+          allEvents.push({
+            time: cur,
+            item: {
+              type: 'phrase',
+              data: {
+                id: `p-${detectedGaps.length + 1}`,
+                speaker: 'Спикер',
+                startTime: cur,
+                endTime: totalDuration,
+                text: `Речь спикера (фрагмент ${detectedGaps.length + 1})`,
+              },
+            },
+          })
+        }
+      }
+
+      allEvents.sort((a, b) => a.time - b.time)
+      if (allEvents.length > 0) {
+        setItems(allEvents.map((e) => e.item))
+      }
+    } catch (err) {
+      alert(`Ошибка пересчета пауз: ${err}`)
+    } finally {
+      setIsAnalyzing(false)
+    }
+  }
+
   // Play / Pause toggle
   const togglePlay = () => {
     if (!videoRef.current) return
@@ -280,7 +371,7 @@ export default function App() {
     const t = videoRef.current.currentTime
     setCurrentTime(t)
 
-    // Ignore while already seeking or jumping to prevent infinite loops
+    // Ignore while already seeking or jumping
     if (videoRef.current.seeking || isSkippingRef.current) return
 
     const PAD_OUT = 0.12 // 120ms natural voice decay tail
@@ -364,7 +455,7 @@ export default function App() {
     )
   }
 
-  // Export trimmed video
+  // Export trimmed video with all options
   const handleExport = async () => {
     try {
       if (!filePath) {
@@ -376,6 +467,10 @@ export default function App() {
         .filter((i): i is { type: 'silence'; data: SilenceGap } => i.type === 'silence' && i.data.isCut)
         .map((s) => [s.data.startTime, s.data.endTime])
 
+      const phrasesToExport = items
+        .filter((i): i is { type: 'phrase'; data: Phrase } => i.type === 'phrase')
+        .map((p) => p.data)
+
       const defaultName = `subcut_${filePath.split(/[\\/]/).pop()}`
       const outputPath = await invoke<string | null>('select_output_file_cmd', { defaultName })
       if (!outputPath) return
@@ -386,6 +481,9 @@ export default function App() {
         cuts,
         outputPath,
         totalDuration,
+        punchInZoom,
+        burnSubtitles,
+        phrases: phrasesToExport,
       })
       alert(`Видео успешно смонтировано:\n${outputPath}`)
     } catch (err) {
@@ -471,9 +569,53 @@ export default function App() {
           </div>
         </div>
 
-        {/* Right: Actions */}
+        {/* Right: Actions & Pro Features Settings */}
         <div className="flex items-center gap-2">
-          {/* Pause Toggle */}
+          
+          {/* Quick Toggles */}
+          <button
+            onClick={() => setPunchInZoom(!punchInZoom)}
+            className={`h-7 px-2.5 rounded text-xs font-medium border flex items-center gap-1.5 transition ${
+              punchInZoom
+                ? 'bg-zinc-800 text-zinc-200 border-zinc-600'
+                : 'bg-zinc-900/60 text-zinc-500 border-zinc-800 hover:text-zinc-300'
+            }`}
+            title="Чередование зума 106% на склейках"
+          >
+            <ZoomIn className="w-3.5 h-3.5" />
+            <span className="hidden lg:inline">Zoom 106%</span>
+          </button>
+
+          <button
+            onClick={() => setBurnSubtitles(!burnSubtitles)}
+            className={`h-7 px-2.5 rounded text-xs font-medium border flex items-center gap-1.5 transition ${
+              burnSubtitles
+                ? 'bg-zinc-800 text-zinc-200 border-zinc-600'
+                : 'bg-zinc-900/60 text-zinc-500 border-zinc-800 hover:text-zinc-300'
+            }`}
+            title="Вшивание субтитров в видео при экспорте"
+          >
+            <Type className="w-3.5 h-3.5" />
+            <span className="hidden lg:inline">Субтитры</span>
+          </button>
+
+          {/* Settings Modal Button */}
+          <button
+            onClick={() => setIsSettingsOpen(!isSettingsOpen)}
+            className={`h-7 px-2.5 rounded text-xs font-medium border flex items-center gap-1.5 transition ${
+              isSettingsOpen
+                ? 'bg-zinc-700 text-white border-zinc-500'
+                : 'bg-zinc-800/50 hover:bg-zinc-800 text-zinc-300 border-zinc-700/60'
+            }`}
+            title="Параметры монтажа и порога пауз"
+          >
+            <SlidersHorizontal className="w-3.5 h-3.5 text-zinc-400" />
+            <span className="hidden md:inline">Настройки</span>
+          </button>
+
+          <div className="h-3.5 w-px bg-zinc-800" />
+
+          {/* Pause Visibility Toggle */}
           <button
             onClick={() => setShowPauses(!showPauses)}
             className="h-7 px-2.5 rounded text-xs font-medium bg-zinc-800/50 hover:bg-zinc-800 border border-zinc-700/60 text-zinc-300 flex items-center gap-1.5 transition"
@@ -490,7 +632,7 @@ export default function App() {
               className="h-7 px-2.5 rounded text-xs font-medium bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-zinc-300 flex items-center gap-1.5 transition"
             >
               <RotateCcw className="w-3 h-3 text-zinc-400" />
-              <span>Восстановить паузы</span>
+              <span>Восстановить</span>
             </button>
           ) : (
             <button
@@ -498,7 +640,7 @@ export default function App() {
               className="h-7 px-2.5 rounded text-xs font-medium bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-red-300 hover:text-red-200 flex items-center gap-1.5 transition"
             >
               <Scissors className="w-3 h-3 text-red-400" />
-              <span>Вырезать все паузы</span>
+              <span>Вырезать все</span>
             </button>
           )}
 
@@ -515,7 +657,7 @@ export default function App() {
       </header>
 
       {/* 2. MAIN SPLIT: Proportional Video Left / Clean Script Right */}
-      <div className="flex-1 flex overflow-hidden">
+      <div className="flex-1 flex overflow-hidden relative">
         
         {/* LEFT PANE: Video Player Surface */}
         <section className="w-[50%] lg:w-[48%] border-r border-zinc-800/80 bg-zinc-950 flex flex-col justify-between p-4">
@@ -524,12 +666,14 @@ export default function App() {
           <div className="relative flex-1 flex items-center justify-center min-h-0">
             <div className="relative aspect-[9/16] h-full max-h-[520px] bg-black rounded-lg border border-zinc-800/80 overflow-hidden shadow-2xl flex flex-col justify-between select-none">
               
-              {/* Real Video Element or Fallback */}
+              {/* Real Video Element with dynamic Punch-In Zoom scale */}
               {videoSrc ? (
                 <video
                   ref={videoRef}
                   src={videoSrc}
-                  className="w-full h-full object-cover"
+                  className={`w-full h-full object-cover transition-transform duration-200 ease-out ${
+                    isZoomed ? 'scale-[1.06]' : 'scale-100'
+                  }`}
                   playsInline
                   onLoadedMetadata={(e) => {
                     const d = e.currentTarget.duration
@@ -555,13 +699,24 @@ export default function App() {
               )}
 
               {/* Live Subtitle Overlay Styled Like High-Retention Reels */}
-              {activePhrase && (
-                <div className="absolute inset-x-0 bottom-8 px-4 text-center pointer-events-none z-10">
-                  <span className="inline-block px-3 py-1.5 rounded bg-black/75 text-white font-extrabold text-sm md:text-base leading-tight tracking-wide uppercase drop-shadow-[0_2px_4px_rgba(0,0,0,0.95)]">
+              {burnSubtitles && activePhrase && (
+                <div className="absolute inset-x-0 bottom-8 px-4 text-center pointer-events-none z-10 transition-all">
+                  <span className="inline-block px-3 py-1.5 rounded bg-black/80 border border-black/50 text-white font-extrabold text-sm md:text-base leading-tight tracking-wide uppercase drop-shadow-[0_2px_4px_rgba(0,0,0,0.95)]">
                     {activePhrase.data.text}
                   </span>
                 </div>
               )}
+
+              {/* Status Badges in Player Corner */}
+              <div className="absolute top-2.5 left-2.5 flex items-center gap-1.5 pointer-events-none z-10">
+                {punchInZoom && (
+                  <span className={`text-[10px] font-mono font-medium px-1.5 py-0.5 rounded backdrop-blur-sm border transition-all ${
+                    isZoomed ? 'bg-amber-500/20 text-amber-300 border-amber-500/40 font-semibold' : 'bg-black/60 text-zinc-400 border-zinc-700/40'
+                  }`}>
+                    {isZoomed ? 'ZOOM 106%' : 'ZOOM 100%'}
+                  </span>
+                )}
+              </div>
 
               {/* Timecode badge in player corner */}
               <div className="absolute top-2.5 right-2.5 pointer-events-none z-10">
@@ -637,14 +792,17 @@ export default function App() {
           {/* Script Body (Clean Typography, Natural Text Flow) */}
           <div className="flex-1 overflow-y-auto p-5 space-y-4">
             
-            <div className="text-xs text-zinc-500 font-mono mb-2">
-              Кликните по любому слову чтобы перейти в плеере. Паузы тишины встроены в текст.
+            <div className="text-xs text-zinc-500 font-mono mb-2 flex items-center justify-between">
+              <span>Кликните по любому слову чтобы перейти в плеере. Паузы тишины встроены в текст.</span>
+              <span className="text-[11px] text-zinc-500">Whisper: {whisperModel}</span>
             </div>
 
             {items.map((item) => {
               if (item.type === 'phrase') {
                 const isActive = currentTime >= item.data.startTime && currentTime <= item.data.endTime
-                
+                const matchesSearch = searchQuery.trim() === '' || item.data.text.toLowerCase().includes(searchQuery.toLowerCase())
+                if (!matchesSearch) return null
+
                 return (
                   <div
                     key={item.data.id}
@@ -673,7 +831,7 @@ export default function App() {
                 )
               }
 
-              // Silence Item — Rendered as a Clean Minimal Inline Pill, NOT a Giant Red Box!
+              // Silence Item — Rendered as a Clean Minimal Inline Pill
               if (item.type === 'silence') {
                 if (!showPauses && item.data.isCut) return null
 
@@ -703,6 +861,196 @@ export default function App() {
           </div>
 
         </section>
+
+        {/* 2.5 SETTINGS MODAL (TypeUI Shadcn Dark Studio Dialog) */}
+        {isSettingsOpen && (
+          <div className="absolute inset-0 bg-black/60 backdrop-blur-sm z-30 flex items-center justify-center p-4">
+            <div className="w-full max-w-lg bg-zinc-900 border border-zinc-800 rounded-xl shadow-2xl p-6 space-y-5 animate-in fade-in duration-150">
+              
+              {/* Header */}
+              <div className="flex items-center justify-between pb-3 border-b border-zinc-800">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-7 h-7 rounded bg-zinc-800 border border-zinc-700 flex items-center justify-center text-zinc-300">
+                    <SlidersHorizontal className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <h2 className="text-sm font-semibold text-zinc-100">Параметры монтажа</h2>
+                    <p className="text-[11px] text-zinc-400">Настройка чувствительности алгоритмов и экспорта</p>
+                  </div>
+                </div>
+                <button
+                  onClick={() => setIsSettingsOpen(false)}
+                  className="w-7 h-7 rounded hover:bg-zinc-800 text-zinc-400 hover:text-white flex items-center justify-center transition"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              {/* Body Controls */}
+              <div className="space-y-4 text-xs">
+                
+                {/* 1. Silence Threshold (dB) */}
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <label className="font-medium text-zinc-200">Порог шума тишины (dB)</label>
+                    <span className="font-mono text-zinc-400">{silenceThreshold} dB</span>
+                  </div>
+                  <div className="grid grid-cols-4 gap-2">
+                    {[
+                      { val: -25, label: '-25 dB (Шум)' },
+                      { val: -30, label: '-30 dB (Норма)' },
+                      { val: -35, label: '-35 dB (Тишина)' },
+                      { val: -40, label: '-40 dB (Студия)' },
+                    ].map((opt) => (
+                      <button
+                        key={opt.val}
+                        onClick={() => setSilenceThreshold(opt.val)}
+                        className={`h-7 rounded border font-mono text-[11px] transition ${
+                          silenceThreshold === opt.val
+                            ? 'bg-zinc-100 text-zinc-950 border-white font-medium'
+                            : 'bg-zinc-950/60 text-zinc-400 border-zinc-800 hover:text-zinc-200'
+                        }`}
+                      >
+                        {opt.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* 2. Minimum Silence Duration (seconds) */}
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <label className="font-medium text-zinc-200">Минимальная длина паузы</label>
+                    <span className="font-mono text-zinc-400">{minSilenceDuration} с</span>
+                  </div>
+                  <div className="grid grid-cols-4 gap-2">
+                    {[
+                      { val: 0.3, label: '0.3с (Рилсы)' },
+                      { val: 0.5, label: '0.5с (Стандарт)' },
+                      { val: 0.8, label: '0.8с (Мягкий)' },
+                      { val: 1.0, label: '1.0с (Длинные)' },
+                    ].map((opt) => (
+                      <button
+                        key={opt.val}
+                        onClick={() => setMinSilenceDuration(opt.val)}
+                        className={`h-7 rounded border font-mono text-[11px] transition ${
+                          minSilenceDuration === opt.val
+                            ? 'bg-zinc-100 text-zinc-950 border-white font-medium'
+                            : 'bg-zinc-950/60 text-zinc-400 border-zinc-800 hover:text-zinc-200'
+                        }`}
+                      >
+                        {opt.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Recalculate CTA */}
+                {filePath && (
+                  <button
+                    onClick={() => {
+                      handleRecalculateSilences()
+                      setIsSettingsOpen(false)
+                    }}
+                    disabled={isAnalyzing}
+                    className="w-full h-8 rounded bg-zinc-800 hover:bg-zinc-750 border border-zinc-700 text-zinc-200 flex items-center justify-center gap-2 font-medium transition"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${isAnalyzing ? 'animate-spin' : ''}`} />
+                    <span>Пересчитать паузы с новыми параметрами</span>
+                  </button>
+                )}
+
+                <div className="h-px bg-zinc-800 my-2" />
+
+                {/* 3. Whisper Model Selection */}
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <label className="font-medium text-zinc-200 flex items-center gap-1.5">
+                      <Sparkles className="w-3.5 h-3.5 text-amber-400" />
+                      <span>Модель распознавания речи (Whisper)</span>
+                    </label>
+                    <span className="font-mono text-zinc-400">{whisperModel}</span>
+                  </div>
+                  <div className="grid grid-cols-3 gap-2">
+                    {[
+                      { val: 'tiny', label: 'tiny (~1с, черновик)' },
+                      { val: 'base', label: 'base (баланс, 3с)' },
+                      { val: 'small', label: 'small (макс. точность)' },
+                    ].map((opt) => (
+                      <button
+                        key={opt.val}
+                        onClick={() => setWhisperModel(opt.val)}
+                        className={`h-8 px-2 rounded border text-[11px] transition ${
+                          whisperModel === opt.val
+                            ? 'bg-zinc-100 text-zinc-950 border-white font-medium'
+                            : 'bg-zinc-950/60 text-zinc-400 border-zinc-800 hover:text-zinc-200'
+                        }`}
+                      >
+                        {opt.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="h-px bg-zinc-800 my-2" />
+
+                {/* 4. Punch-In Zoom Toggle */}
+                <div
+                  onClick={() => setPunchInZoom(!punchInZoom)}
+                  className="flex items-center justify-between p-2.5 rounded bg-zinc-950/60 border border-zinc-800/80 cursor-pointer hover:border-zinc-700 transition"
+                >
+                  <div className="pr-4">
+                    <div className="font-medium text-zinc-200 flex items-center gap-1.5">
+                      <ZoomIn className="w-3.5 h-3.5 text-zinc-400" />
+                      <span>Punch-In Zoom (чередование 100% / 106%)</span>
+                    </div>
+                    <div className="text-[11px] text-zinc-400 mt-0.5">
+                      Скрывает склейки между репликами, создавая эффект динамичной съемки с двух камер
+                    </div>
+                  </div>
+                  <div className={`w-5 h-5 rounded border flex items-center justify-center transition flex-shrink-0 ${
+                    punchInZoom ? 'bg-zinc-100 border-white text-zinc-950' : 'border-zinc-700 bg-zinc-900'
+                  }`}>
+                    {punchInZoom && <Check className="w-3.5 h-3.5 stroke-[3]" />}
+                  </div>
+                </div>
+
+                {/* 5. Burn-In Subtitles Toggle */}
+                <div
+                  onClick={() => setBurnSubtitles(!burnSubtitles)}
+                  className="flex items-center justify-between p-2.5 rounded bg-zinc-950/60 border border-zinc-800/80 cursor-pointer hover:border-zinc-700 transition"
+                >
+                  <div className="pr-4">
+                    <div className="font-medium text-zinc-200 flex items-center gap-1.5">
+                      <Type className="w-3.5 h-3.5 text-zinc-400" />
+                      <span>Вшивать субтитры в видео при экспорте</span>
+                    </div>
+                    <div className="text-[11px] text-zinc-400 mt-0.5">
+                      Рендерит стильные контрастные белые субтитры прямо в MP4 (формат 9:16)
+                    </div>
+                  </div>
+                  <div className={`w-5 h-5 rounded border flex items-center justify-center transition flex-shrink-0 ${
+                    burnSubtitles ? 'bg-zinc-100 border-white text-zinc-950' : 'border-zinc-700 bg-zinc-900'
+                  }`}>
+                    {burnSubtitles && <Check className="w-3.5 h-3.5 stroke-[3]" />}
+                  </div>
+                </div>
+
+              </div>
+
+              {/* Footer */}
+              <div className="flex justify-end pt-3 border-t border-zinc-800">
+                <button
+                  onClick={() => setIsSettingsOpen(false)}
+                  className="h-8 px-4 rounded bg-zinc-100 hover:bg-white text-zinc-950 text-xs font-semibold transition"
+                >
+                  Готово
+                </button>
+              </div>
+
+            </div>
+          </div>
+        )}
 
       </div>
 
@@ -784,9 +1132,13 @@ export default function App() {
             <span>Клик по таймлайну: переместить курсор</span>
             <span>•</span>
             <span>Пробел: Старт/Пауза</span>
+            <span>•</span>
+            <span className="text-zinc-400">Стрелки ← / →: переход ±2с</span>
           </div>
-          <div>
-            <span>FFmpeg: silencedetect=-30dB</span>
+          <div className="flex items-center gap-2">
+            <span>Порог: {silenceThreshold}dB</span>
+            <span>•</span>
+            <span>Мин: {minSilenceDuration}с</span>
           </div>
         </div>
 

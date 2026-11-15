@@ -9,10 +9,10 @@ if sys.platform == 'win32':
     except Exception:
         pass
 
-def transcribe(video_path):
+def transcribe(video_path, model_name='base'):
     import faster_whisper
-    # Use base model (fast and accurate on CPU)
-    model = faster_whisper.WhisperModel('base', device='cpu', compute_type='int8')
+    # Use selected model (e.g. tiny, base, small) with INT8 quantization on CPU
+    model = faster_whisper.WhisperModel(model_name, device='cpu', compute_type='int8')
     segments, info = model.transcribe(video_path, beam_size=1)
     
     results = []
@@ -37,8 +37,9 @@ if __name__ == '__main__':
         sys.exit(0)
         
     path = sys.argv[1]
+    model_name = sys.argv[2] if len(sys.argv) > 2 and sys.argv[2].strip() else 'base'
     try:
-        data = transcribe(path)
+        data = transcribe(path, model_name)
         output_bytes = json.dumps(data, ensure_ascii=False).encode('utf-8')
         sys.stdout.buffer.write(output_bytes)
     except Exception as e:

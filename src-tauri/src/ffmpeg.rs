@@ -33,6 +33,75 @@ pub struct VideoInfo {
     pub fps: f64,
 }
 
+/// Helper to format seconds as ASS timestamp format (H:MM:SS.cs)
+fn format_ass_time(seconds: f64) -> String {
+    let s = seconds.max(0.0);
+    let h = (s / 3600.0).floor() as u32;
+    let m = ((s % 3600.0) / 60.0).floor() as u32;
+    let sec = (s % 60.0).floor() as u32;
+    let cs = ((s % 1.0) * 100.0).round() as u32;
+    format!("{}:{:02}:{:02}.{:02}", h, m, sec, cs)
+}
+
+/// Generates an ASS subtitle file with clean TikTok/Reels style:
+/// bold font, high-contrast outline, centered at the bottom third
+pub fn generate_ass_subtitles(
+    phrases: &[Phrase],
+    keep_intervals: &[(f64, f64)],
+    output_path: &str,
+) -> Result<(), String> {
+    let map_time = |t: f64| -> f64 {
+        let mut out_time = 0.0;
+        for &(k_start, k_end) in keep_intervals {
+            if t < k_start {
+                return out_time;
+            } else if t <= k_end {
+                return out_time + (t - k_start);
+            } else {
+                out_time += k_end - k_start;
+            }
+        }
+        out_time
+    };
+
+    let mut ass = String::new();
+    ass.push_str("[Script Info]\n");
+    ass.push_str("ScriptType: v4.00+\n");
+    ass.push_str("PlayResX: 1080\n");
+    ass.push_str("PlayResY: 1920\n\n");
+
+    ass.push_str("[V4+ Styles]\n");
+    ass.push_str("Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n");
+    // Style: Arial Bold 54pt, Pure White text, solid Black outline (3.5px), soft shadow, bottom-center alignment (2), 220px bottom margin
+    ass.push_str("Style: Default,Arial,54,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,3.5,1.5,2,40,40,220,1\n\n");
+
+    ass.push_str("[Events]\n");
+    ass.push_str("Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n");
+
+    for p in phrases {
+        let text = p.text.trim();
+        if text.is_empty() {
+            continue;
+        }
+        let start = map_time(p.start_time);
+        let end = map_time(p.end_time);
+        if end > start + 0.12 {
+            let clean_text = text.replace('{', "(").replace('}', ")").replace('\n', "\\N");
+            ass.push_str(&format!(
+                "Dialogue: 0,{},{},Default,,0,0,0,,{}\n",
+                format_ass_time(start),
+                format_ass_time(end),
+                clean_text
+            ));
+        }
+    }
+
+    std::fs::write(output_path, ass.as_bytes())
+        .map_err(|e| format!("Не удалось создать файл субтитров: {}", e))?;
+
+    Ok(())
+}
+
 /// Detects silence intervals using FFmpeg silencedetect audio filter
 pub fn detect_silence(
     path: &str,
@@ -160,12 +229,15 @@ pub fn extract_waveform(path: &str, points: usize) -> Result<Vec<u8>, String> {
 
 /// Cuts video without re-encoding quality degradation using filter_complex concat
 /// Applies audio micro-crossfades (25ms) and speech edge padding (0.12s out / 0.10s in)
-/// to eliminate abrupt jump clicks and clipped consonants.
+/// Supports optional alternating Punch-In Zoom (106%) and hardcoded Subtitles burn-in.
 pub fn export_trimmed_video(
     input_path: &str,
     cut_intervals: &[(f64, f64)],
     output_path: &str,
     total_duration: f64,
+    punch_in_zoom: bool,
+    burn_subtitles: bool,
+    phrases: &[Phrase],
 ) -> Result<(), String> {
     // 1. Calculate keep intervals with smooth edge padding
     const PAD_OUT: f64 = 0.12; // preserve voice decay tail
@@ -178,11 +250,9 @@ pub fn export_trimmed_video(
     sorted_cuts.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
 
     for &(cut_start, cut_end) in &sorted_cuts {
-        // Effective cut bounds with safety padding
         let eff_start = (cut_start + PAD_OUT).min(cut_end);
         let eff_end = (cut_end - PAD_IN).max(eff_start);
 
-        // Only cut if there is meaningful silence left (> 0.08s)
         if eff_end - eff_start > 0.08 {
             if eff_start > current_pos + 0.05 {
                 keep_intervals.push((current_pos, eff_start));
@@ -199,17 +269,32 @@ pub fn export_trimmed_video(
         return Err("Все фрагменты видео вырезаны".into());
     }
 
-    // 2. Build filter_complex string with 25ms audio micro-fades
+    // 2. Subtitle file generation (if enabled)
+    let temp_ass_path = format!("{}.temp_subtitles.ass", output_path);
+    let should_burn = burn_subtitles && !phrases.is_empty();
+
+    if should_burn {
+        generate_ass_subtitles(phrases, &keep_intervals, &temp_ass_path)?;
+    }
+
+    // 3. Build filter_complex string with 25ms audio micro-fades and optional punch-in zoom
     let mut filter_complex = String::new();
     let mut concat_inputs = String::new();
 
     for (i, &(start, end)) in keep_intervals.iter().enumerate() {
         let dur = end - start;
-        let fade_len = (dur * 0.15).min(0.025); // 25ms fade (or shorter if clip is very short)
+        let fade_len = (dur * 0.15).min(0.025); // 25ms fade
+
+        // Alternate zoom on odd clips (106% punch-in zoom)
+        let zoom_filter = if punch_in_zoom && i % 2 == 1 {
+            ",scale=ceil(iw*1.06/2)*2:ceil(ih*1.06/2)*2,crop=trunc(in_w/1.06/2)*2:trunc(in_h/1.06/2)*2,setsar=1"
+        } else {
+            ",setsar=1"
+        };
 
         filter_complex.push_str(&format!(
-            "[0:v]trim=start={:.3}:end={:.3},setpts=PTS-STARTPTS[v{}];",
-            start, end, i
+            "[0:v]trim=start={:.3}:end={:.3},setpts=PTS-STARTPTS{}[v{}];",
+            start, end, zoom_filter, i
         ));
         filter_complex.push_str(&format!(
             "[0:a]atrim=start={:.3}:end={:.3},asetpts=PTS-STARTPTS,afade=t=in:st=0:d={:.3},afade=t=out:st={:.3}:d={:.3}[a{}];",
@@ -218,13 +303,23 @@ pub fn export_trimmed_video(
         concat_inputs.push_str(&format!("[v{}][a{}]", i, i));
     }
 
-    filter_complex.push_str(&format!(
-        "{}concat=n={}:v=1:a=1[outv][outa]",
-        concat_inputs,
-        keep_intervals.len()
-    ));
+    if should_burn {
+        filter_complex.push_str(&format!(
+            "{}concat=n={}:v=1:a=1[concatv][outa];",
+            concat_inputs,
+            keep_intervals.len()
+        ));
+        let escaped_ass = temp_ass_path.replace('\\', "/").replace(':', "\\:");
+        filter_complex.push_str(&format!("[concatv]subtitles='{}'[outv]", escaped_ass));
+    } else {
+        filter_complex.push_str(&format!(
+            "{}concat=n={}:v=1:a=1[outv][outa]",
+            concat_inputs,
+            keep_intervals.len()
+        ));
+    }
 
-    // 3. Execute FFmpeg
+    // 4. Execute FFmpeg
     let output = Command::new("ffmpeg")
         .args(&[
             "-y",
@@ -249,8 +344,14 @@ pub fn export_trimmed_video(
             "192k",
             output_path,
         ])
-        .output()
-        .map_err(|e| format!("Ошибка выполнения FFmpeg: {}", e))?;
+        .output();
+
+    // Clean up temporary ASS file
+    if should_burn {
+        let _ = std::fs::remove_file(&temp_ass_path);
+    }
+
+    let output = output.map_err(|e| format!("Ошибка выполнения FFmpeg: {}", e))?;
 
     if !output.status.success() {
         let err = String::from_utf8_lossy(&output.stderr);
@@ -260,12 +361,12 @@ pub fn export_trimmed_video(
     Ok(())
 }
 
-/// Transcribes speech using faster-whisper INT8 helper
-pub fn transcribe_speech(path: &str) -> Result<Vec<Phrase>, String> {
+/// Transcribes speech using faster-whisper INT8 helper with configurable model
+pub fn transcribe_speech(path: &str, model_size: &str) -> Result<Vec<Phrase>, String> {
     let script_path = concat!(env!("CARGO_MANIFEST_DIR"), "\\transcribe.py");
     let output = Command::new("python")
         .env("PYTHONIOENCODING", "utf-8")
-        .args(&[script_path, path])
+        .args(&[script_path, path, model_size])
         .output()
         .map_err(|e| format!("Не удалось вызвать Whisper: {}", e))?;
 
