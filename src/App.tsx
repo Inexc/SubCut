@@ -20,6 +20,7 @@ import {
   FileText,
   Clapperboard,
   Zap,
+  Globe,
 } from 'lucide-react'
 
 interface Word {
@@ -164,6 +165,7 @@ export default function App() {
   const [silenceThreshold, setSilenceThreshold] = useState<number>(-30.0)
   const [minSilenceDuration, setMinSilenceDuration] = useState<number>(0.5)
   const [whisperModel, setWhisperModel] = useState<string>('base')
+  const [speechLanguage, setSpeechLanguage] = useState<string>('ru')
   const [burnSubtitles, setBurnSubtitles] = useState<boolean>(true)
   const [subtitlePreset, setSubtitlePreset] = useState<'hormozi' | 'classic' | 'box'>('hormozi')
   const [hardwareAccel, setHardwareAccel] = useState<'auto' | 'nvenc' | 'cpu'>('auto')
@@ -181,11 +183,13 @@ export default function App() {
   const cutDuration = activeCuts.reduce((acc, s) => acc + s.data.duration, 0)
   const remainingDuration = Math.max(0, totalDuration - cutDuration)
 
-  // List of phrases for subtitle overlay
+  // List of phrases for subtitle overlay (with buffer so words don't vanish on micro-pauses)
   const phraseList = items.filter((i): i is { type: 'phrase'; data: Phrase } => i.type === 'phrase')
-  const activePhraseIndex = phraseList.findIndex(
-    (p) => currentTime >= p.data.startTime && currentTime <= p.data.endTime
-  )
+  const activePhraseIndex = phraseList.findIndex((p, idx) => {
+    const nextPhrase = phraseList[idx + 1]
+    const maxEnd = nextPhrase ? Math.min(p.data.endTime + 0.35, nextPhrase.data.startTime) : p.data.endTime + 0.35
+    return currentTime >= p.data.startTime && currentTime <= maxEnd
+  })
   const activePhrase = activePhraseIndex >= 0 ? phraseList[activePhraseIndex] : null
 
   // Open Video File
@@ -223,13 +227,14 @@ export default function App() {
         setWaveform(peaks)
       }
 
-      // 4. Transcribe speech using Whisper AI with word timestamps
+      // 4. Transcribe speech using Whisper AI with word timestamps & selected language
       setAnalyzingStatus('Распознавание речи через Whisper (пословные таймкоды)...')
       let phrases: Phrase[] = []
       try {
         phrases = await invoke<Phrase[]>('transcribe_speech_cmd', {
           path: selected,
           modelSize: whisperModel,
+          language: speechLanguage,
         })
       } catch (wErr) {
         console.warn('Whisper transcription error:', wErr)
@@ -365,6 +370,46 @@ export default function App() {
       }
     } catch (err) {
       alert(`Ошибка пересчета пауз: ${err}`)
+    } finally {
+      setIsAnalyzing(false)
+      setAnalyzingStatus('')
+    }
+  }
+
+  // Re-transcribe speech with selected model and language
+  const handleRetranscribeSpeech = async () => {
+    if (!filePath) return
+    try {
+      setIsAnalyzing(true)
+      setAnalyzingStatus('Распознавание речи через Whisper (пословные таймкоды)...')
+      const phrases = await invoke<Phrase[]>('transcribe_speech_cmd', {
+        path: filePath,
+        modelSize: whisperModel,
+        language: speechLanguage,
+      })
+
+      // Keep current silences
+      const currentSilences = items
+        .filter((i): i is { type: 'silence'; data: SilenceGap } => i.type === 'silence')
+        .map((s) => s.data)
+
+      const allEvents: { time: number; item: ScriptItem }[] = []
+      currentSilences.forEach((gap) => {
+        allEvents.push({ time: gap.startTime, item: { type: 'silence', data: gap } })
+      })
+
+      if (phrases && phrases.length > 0) {
+        phrases.forEach((phrase) => {
+          allEvents.push({ time: phrase.startTime, item: { type: 'phrase', data: phrase } })
+        })
+      }
+
+      allEvents.sort((a, b) => a.time - b.time)
+      if (allEvents.length > 0) {
+        setItems(allEvents.map((e) => e.item))
+      }
+    } catch (err) {
+      alert(`Ошибка распознавания речи: ${err}`)
     } finally {
       setIsAnalyzing(false)
       setAnalyzingStatus('')
@@ -849,7 +894,9 @@ export default function App() {
                     <div className="inline-block px-3 py-1.5 rounded bg-black/85 border border-black/60 shadow-2xl drop-shadow-[0_4px_10px_rgba(0,0,0,0.95)] max-w-[90%]">
                       {activePhrase.data.words && activePhrase.data.words.length > 0 ? (
                         activePhrase.data.words.map((w, wIdx) => {
-                          const isWordActive = currentTime >= w.startTime && currentTime <= w.endTime
+                          const nextWord = activePhrase.data.words![wIdx + 1]
+                          const wordEnd = nextWord ? Math.min(w.endTime + 0.15, nextWord.startTime) : w.endTime + 0.2
+                          const isWordActive = currentTime >= w.startTime && currentTime <= wordEnd
                           return (
                             <span
                               key={wIdx}
@@ -959,12 +1006,12 @@ export default function App() {
             
             <div className="text-xs text-zinc-500 font-mono mb-2 flex items-center justify-between">
               <span>Кликните по любому слову чтобы перейти в плеере. Паузы тишины встроены в текст.</span>
-              <span className="text-[11px] text-zinc-500">Whisper: {whisperModel}</span>
+              <span className="text-[11px] text-zinc-400 font-medium">Whisper: {whisperModel} · {speechLanguage.toUpperCase()}</span>
             </div>
 
             {items.map((item) => {
               if (item.type === 'phrase') {
-                const isActive = currentTime >= item.data.startTime && currentTime <= item.data.endTime
+                const isActive = currentTime >= item.data.startTime && currentTime <= (item.data.endTime + 0.35)
                 const matchesSearch = searchQuery.trim() === '' || item.data.text.toLowerCase().includes(searchQuery.toLowerCase())
                 if (!matchesSearch) return null
 
@@ -1180,6 +1227,17 @@ export default function App() {
                   </div>
                 </div>
 
+                {/* Silence Threshold Audio Tip for BGM / Anime */}
+                <div className="text-[11px] text-zinc-400 bg-zinc-950/60 p-2.5 rounded border border-zinc-800/80 space-y-1">
+                  <div className="text-zinc-200 font-medium flex items-center gap-1.5">
+                    <SlidersHorizontal className="w-3.5 h-3.5 text-amber-400" />
+                    <span>Совет для видео с музыкой или шумом:</span>
+                  </div>
+                  <p className="text-zinc-400 text-[11px] leading-relaxed">
+                    Для обычных разговоров подходит <span className="text-zinc-200 font-mono">-30 dB</span>. Если в видео звучит фоновая музыка (как в аниме или играх), выберите <span className="text-amber-400 font-mono font-semibold">-22 dB</span> или <span className="text-amber-400 font-mono font-semibold">-25 dB</span> и нажмите «Пересчитать паузы».
+                  </p>
+                </div>
+
                 {/* Recalculate CTA */}
                 {filePath && (
                   <button
@@ -1188,10 +1246,10 @@ export default function App() {
                       setIsSettingsOpen(false)
                     }}
                     disabled={isAnalyzing}
-                    className="w-full h-8 rounded bg-zinc-800 hover:bg-zinc-750 border border-zinc-700 text-zinc-200 flex items-center justify-center gap-2 font-medium transition"
+                    className="w-full h-8 rounded bg-zinc-800 hover:bg-zinc-750 border border-zinc-700 text-zinc-200 flex items-center justify-center gap-2 font-medium transition text-xs"
                   >
                     <RefreshCw className={`w-3.5 h-3.5 ${isAnalyzing ? 'animate-spin' : ''}`} />
-                    <span>Пересчитать паузы с новыми параметрами</span>
+                    <span>Пересчитать паузы тишины (FFmpeg)</span>
                   </button>
                 )}
 
@@ -1226,6 +1284,54 @@ export default function App() {
                     ))}
                   </div>
                 </div>
+
+                {/* 6. Whisper Language Selection */}
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <label className="font-medium text-zinc-200 flex items-center gap-1.5">
+                      <Globe className="w-3.5 h-3.5 text-blue-400" />
+                      <span>Язык озвучки / распознавания</span>
+                    </label>
+                    <span className="font-mono text-blue-400 font-semibold">{speechLanguage.toUpperCase()}</span>
+                  </div>
+                  <div className="grid grid-cols-3 gap-2">
+                    {[
+                      { val: 'ru', label: 'Русский (ru)' },
+                      { val: 'auto', label: 'Авто (auto)' },
+                      { val: 'en', label: 'English (en)' },
+                    ].map((opt) => (
+                      <button
+                        key={opt.val}
+                        onClick={() => setSpeechLanguage(opt.val)}
+                        className={`h-8 px-2 rounded border text-[11px] transition ${
+                          speechLanguage === opt.val
+                            ? 'bg-zinc-100 text-zinc-950 border-white font-medium'
+                            : 'bg-zinc-950/60 text-zinc-400 border-zinc-800 hover:text-zinc-200'
+                        }`}
+                      >
+                        {opt.label}
+                      </button>
+                    ))}
+                  </div>
+                  <p className="text-[10px] text-zinc-400">
+                    Для русскоязычных видео, аниме и клипов оставляйте «Русский» — это предотвращает пропуски слов и галлюцинации перевода на английский.
+                  </p>
+                </div>
+
+                {/* Re-transcribe Speech CTA */}
+                {filePath && (
+                  <button
+                    onClick={() => {
+                      handleRetranscribeSpeech()
+                      setIsSettingsOpen(false)
+                    }}
+                    disabled={isAnalyzing}
+                    className="w-full h-8 rounded bg-zinc-800 hover:bg-zinc-750 border border-zinc-700 text-zinc-200 flex items-center justify-center gap-2 font-medium transition text-xs"
+                  >
+                    <Sparkles className={`w-3.5 h-3.5 text-amber-400 ${isAnalyzing ? 'animate-spin' : ''}`} />
+                    <span>Перераспознать текст и субтитры ({whisperModel} · {speechLanguage.toUpperCase()})</span>
+                  </button>
+                )}
 
               </div>
 

@@ -9,11 +9,27 @@ if sys.platform == 'win32':
     except Exception:
         pass
 
-def transcribe(video_path, model_name='base'):
+def transcribe(video_path, model_name='base', language='ru'):
     import faster_whisper
     # Use selected model (e.g. tiny, base, small) with INT8 quantization and word-level timestamps
     model = faster_whisper.WhisperModel(model_name, device='cpu', compute_type='int8')
-    segments, info = model.transcribe(video_path, beam_size=1, word_timestamps=True)
+    
+    transcribe_kwargs = {
+        'beam_size': 1,
+        'word_timestamps': True,
+        'condition_on_previous_text': False,
+    }
+    
+    lang = language.strip().lower() if language else 'ru'
+    if lang in ('auto', 'none', ''):
+        # Auto detect language
+        pass
+    else:
+        transcribe_kwargs['language'] = lang
+        if lang == 'ru':
+            transcribe_kwargs['initial_prompt'] = 'Русская речь, субтитры, диалог, четкие фразы.'
+
+    segments, info = model.transcribe(video_path, **transcribe_kwargs)
     
     results = []
     idx = 1
@@ -49,8 +65,9 @@ if __name__ == '__main__':
         
     path = sys.argv[1]
     model_name = sys.argv[2] if len(sys.argv) > 2 and sys.argv[2].strip() else 'base'
+    language = sys.argv[3] if len(sys.argv) > 3 and sys.argv[3].strip() else 'ru'
     try:
-        data = transcribe(path, model_name)
+        data = transcribe(path, model_name, language)
         output_bytes = json.dumps(data, ensure_ascii=False).encode('utf-8')
         sys.stdout.buffer.write(output_bytes)
     except Exception as e:

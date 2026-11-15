@@ -169,15 +169,25 @@ pub fn generate_ass_subtitles(
     ass.push_str("[Events]\n");
     ass.push_str("Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n");
 
-    for p in phrases {
+    for (i, p) in phrases.iter().enumerate() {
         let text = p.text.trim();
         if text.is_empty() {
             continue;
         }
         let start = map_time(p.start_time);
-        let end = map_time(p.end_time);
+        let mut end = map_time(p.end_time);
 
-        if end > start + 0.12 {
+        // Ensure at least 0.5s readability unless next phrase starts sooner
+        if let Some(next_p) = phrases.get(i + 1) {
+            let next_start = map_time(next_p.start_time);
+            if next_start > start + 0.05 {
+                end = end.max(start + 0.5).min(next_start - 0.05);
+            }
+        } else {
+            end = end.max(start + 0.5);
+        }
+
+        if end > start + 0.08 {
             let event_text = if preset == "hormozi" && !p.words.is_empty() {
                 // Word-by-word karaoke highlight for Hormozi preset
                 let mut line = String::new();
@@ -236,14 +246,25 @@ pub fn export_subtitles_srt(
     let mut srt = String::new();
     let mut index = 1;
 
-    for p in phrases {
+    for (i, p) in phrases.iter().enumerate() {
         let text = p.text.trim();
         if text.is_empty() {
             continue;
         }
         let start = map_time(p.start_time);
-        let end = map_time(p.end_time);
-        if end > start + 0.1 {
+        let mut end = map_time(p.end_time);
+
+        // Ensure at least 0.5s readability unless next phrase starts sooner
+        if let Some(next_p) = phrases.get(i + 1) {
+            let next_start = map_time(next_p.start_time);
+            if next_start > start + 0.05 {
+                end = end.max(start + 0.5).min(next_start - 0.05);
+            }
+        } else {
+            end = end.max(start + 0.5);
+        }
+
+        if end > start + 0.08 {
             srt.push_str(&format!(
                 "{}\n{} --> {}\n{}\n\n",
                 index,
@@ -582,12 +603,12 @@ pub fn export_trimmed_video(
     Ok(())
 }
 
-/// Transcribes speech using faster-whisper INT8 helper with configurable model and word timestamps
-pub fn transcribe_speech(path: &str, model_size: &str) -> Result<Vec<Phrase>, String> {
+/// Transcribes speech using faster-whisper INT8 helper with configurable model, language, and word timestamps
+pub fn transcribe_speech(path: &str, model_size: &str, language: &str) -> Result<Vec<Phrase>, String> {
     let script_path = concat!(env!("CARGO_MANIFEST_DIR"), "\\transcribe.py");
     let output = new_command("python")
         .env("PYTHONIOENCODING", "utf-8")
-        .args(&[script_path, path, model_size])
+        .args(&[script_path, path, model_size, language])
         .output()
         .map_err(|e| format!("Не удалось вызвать Whisper: {}", e))?;
 

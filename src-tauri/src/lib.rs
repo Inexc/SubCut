@@ -108,9 +108,11 @@ async fn get_video_duration_cmd(path: String) -> Result<f64, String> {
 async fn transcribe_speech_cmd(
     path: String,
     model_size: Option<String>,
+    language: Option<String>,
 ) -> Result<Vec<Phrase>, String> {
     let model = model_size.unwrap_or_else(|| "base".to_string());
-    tauri::async_runtime::spawn_blocking(move || ffmpeg::transcribe_speech(&path, &model))
+    let lang = language.unwrap_or_else(|| "ru".to_string());
+    tauri::async_runtime::spawn_blocking(move || ffmpeg::transcribe_speech(&path, &model, &lang))
         .await
         .map_err(|e| format!("Task error: {}", e))?
 }
