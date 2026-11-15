@@ -151,6 +151,39 @@ if ($f.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
 }
 
 #[tauri::command]
+async fn select_audio_file_cmd() -> Option<String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let script = r#"
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$OutputEncoding = [System.Text.Encoding]::UTF8
+Add-Type -AssemblyName System.Windows.Forms
+$f = New-Object System.Windows.Forms.OpenFileDialog
+$f.Title = "Выберите фоновую музыку"
+$f.Filter = "Аудио файлы (*.mp3;*.wav;*.aac;*.m4a;*.ogg;*.flac)|*.mp3;*.wav;*.aac;*.m4a;*.ogg;*.flac|Все файлы (*.*)|*.*"
+$f.RestoreDirectory = $true
+$f.Multiselect = $false
+if ($f.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+    [Console]::Out.WriteLine($f.FileName)
+}
+"#;
+        let output = ffmpeg::new_command("powershell")
+            .args(&["-NoProfile", "-Command", script])
+            .output()
+            .ok()?;
+
+        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if path.is_empty() {
+            None
+        } else {
+            Some(path)
+        }
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+#[tauri::command]
 async fn select_output_file_cmd(default_name: String) -> Option<String> {
     select_save_file_cmd(
         "Сохранить видео".to_string(),
@@ -209,9 +242,15 @@ async fn export_trimmed_video_cmd(
     framing_mode: Option<String>,
     color_preset: Option<String>,
     target_bitrate_kbps: Option<u32>,
+    bg_music_path: Option<String>,
+    bg_music_volume: Option<f64>,
+    auto_ducking: Option<bool>,
+    ducking_preset: Option<String>,
 ) -> Result<(), String> {
     let framing = framing_mode.unwrap_or_else(|| "original".to_string());
     let color = color_preset.unwrap_or_else(|| "none".to_string());
+    let bg_vol = bg_music_volume.unwrap_or(0.15);
+    let ducking = auto_ducking.unwrap_or(true);
     tauri::async_runtime::spawn_blocking(move || {
         export_trimmed_video(
             &input_path,
@@ -225,6 +264,10 @@ async fn export_trimmed_video_cmd(
             &framing,
             &color,
             target_bitrate_kbps,
+            bg_music_path.as_deref(),
+            bg_vol,
+            ducking,
+            ducking_preset.as_deref(),
         )
     })
     .await
@@ -274,10 +317,26 @@ async fn export_audio_only_cmd(
     output_path: String,
     total_duration: f64,
     bitrate_kbps: Option<u32>,
+    bg_music_path: Option<String>,
+    bg_music_volume: Option<f64>,
+    auto_ducking: Option<bool>,
+    ducking_preset: Option<String>,
 ) -> Result<(), String> {
     let br = bitrate_kbps.unwrap_or(320);
+    let bg_vol = bg_music_volume.unwrap_or(0.15);
+    let ducking = auto_ducking.unwrap_or(true);
     tauri::async_runtime::spawn_blocking(move || {
-        export_audio_only(&input_path, &cuts, total_duration, &output_path, br)
+        export_audio_only(
+            &input_path,
+            &cuts,
+            total_duration,
+            &output_path,
+            br,
+            bg_music_path.as_deref(),
+            bg_vol,
+            ducking,
+            ducking_preset.as_deref(),
+        )
     })
     .await
     .map_err(|e| format!("Не удалось экспортировать аудио: {}", e))?
@@ -323,6 +382,7 @@ pub fn run() {
             get_video_duration_cmd,
             transcribe_speech_cmd,
             select_video_file_cmd,
+            select_audio_file_cmd,
             select_output_file_cmd,
             select_save_file_cmd,
             calculate_telegram_video_bitrate_cmd,

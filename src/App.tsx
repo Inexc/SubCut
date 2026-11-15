@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useMemo } from 'react'
+import { useState, useRef, useEffect, useMemo, useCallback } from 'react'
 import { invoke, convertFileSrc } from '@tauri-apps/api/core'
 import {
   Scissors,
@@ -207,8 +207,15 @@ export default function App() {
   const [coverFraming, setCoverFraming] = useState<'original' | 'blur_9_16'>('blur_9_16')
   const [coverColor, setCoverColor] = useState<ColorPreset>('none')
 
+  // Background Music & Auto-Ducking State
+  const [bgMusicPath, setBgMusicPath] = useState<string | null>(null)
+  const [bgMusicVolume, setBgMusicVolume] = useState<number>(0.15)
+  const [autoDucking, setAutoDucking] = useState<boolean>(true)
+  const [duckingPreset, setDuckingPreset] = useState<'soft' | 'medium' | 'hard'>('medium')
+
   const videoRef = useRef<HTMLVideoElement>(null)
   const bgVideoRef = useRef<HTMLVideoElement>(null)
+  const bgAudioRef = useRef<HTMLAudioElement>(null)
   const coverVideoRef = useRef<HTMLVideoElement>(null)
   const coverBgRef = useRef<HTMLVideoElement>(null)
   const timelineRef = useRef<HTMLDivElement>(null)
@@ -221,6 +228,105 @@ export default function App() {
   const cutDuration = activeCuts.reduce((acc, s) => acc + s.data.duration, 0)
   const remainingDuration = Math.max(0, totalDuration - cutDuration)
 
+  // Kept intervals calculation matching backend calculate_keep_intervals
+  const keepIntervals = useMemo(() => {
+    if (!totalDuration || totalDuration <= 0.05) return []
+
+    const PAD_OUT = 0.12
+    const PAD_IN = 0.10
+
+    // 1. Sanitize and sort raw cuts
+    const validCuts = items
+      .filter((i): i is { type: 'silence'; data: SilenceGap } => i.type === 'silence' && i.data.isCut)
+      .map((s) => [
+        Math.max(0, Math.min(totalDuration, s.data.startTime)),
+        Math.max(0, Math.min(totalDuration, s.data.endTime)),
+      ])
+      .filter(([start, end]) => isFinite(start) && isFinite(end) && end > start + 0.04)
+      .sort((a, b) => a[0] - b[0])
+
+    // 2. Merge overlapping cuts
+    const mergedCuts: [number, number][] = []
+    for (const [start, end] of validCuts) {
+      const last = mergedCuts[mergedCuts.length - 1]
+      if (last && start <= last[1]) {
+        last[1] = Math.max(last[1], end)
+      } else {
+        mergedCuts.push([start, end])
+      }
+    }
+
+    // 3. Apply edge padding
+    const effectiveCuts: [number, number][] = []
+    for (const [start, end] of mergedCuts) {
+      const effStart = start <= 0.05 ? 0.0 : start + PAD_OUT
+      const effEnd = end >= totalDuration - 0.05 ? totalDuration : end - PAD_IN
+      if (effEnd > effStart + 0.04) {
+        effectiveCuts.push([effStart, effEnd])
+      }
+    }
+
+    // 4. Invert cuts to get keep intervals
+    const keep: [number, number][] = []
+    let cur = 0.0
+    for (const [cutStart, cutEnd] of effectiveCuts) {
+      if (cutStart > cur + 0.04) {
+        keep.push([cur, cutStart])
+      }
+      cur = Math.max(cur, cutEnd)
+    }
+    if (cur < totalDuration - 0.04) {
+      keep.push([cur, totalDuration])
+    }
+    return keep
+  }, [items, totalDuration])
+
+  // Map original unedited timestamp to trimmed playback timestamp (matching Rust map_original_to_trimmed)
+  const mapOriginalToTrimmed = useCallback(
+    (t: number) => {
+      if (keepIntervals.length === 0) return t
+      let outTime = 0.0
+      for (const [kStart, kEnd] of keepIntervals) {
+        if (t < kStart) {
+          return outTime
+        } else if (t <= kEnd) {
+          return outTime + (t - kStart)
+        } else {
+          outTime += kEnd - kStart
+        }
+      }
+      return outTime
+    },
+    [keepIntervals]
+  )
+
+  // Track name for background music
+  const bgMusicName = useMemo(() => {
+    if (!bgMusicPath) return ''
+    return bgMusicPath.split(/[\\/]/).pop() || bgMusicPath
+  }, [bgMusicPath])
+
+  // Select audio file for background music
+  const handleSelectBgMusic = async () => {
+    try {
+      const selected = await invoke<string | null>('select_audio_file_cmd')
+      if (selected) {
+        setBgMusicPath(selected)
+      }
+    } catch (err) {
+      alert(`Ошибка выбора аудиофайла: ${err}`)
+    }
+  }
+
+  // Clear background music
+  const handleClearBgMusic = () => {
+    setBgMusicPath(null)
+    if (bgAudioRef.current) {
+      bgAudioRef.current.pause()
+      bgAudioRef.current.currentTime = 0
+    }
+  }
+
   // Active phrase calculation
   const phraseList = items.filter((i): i is { type: 'phrase'; data: Phrase } => i.type === 'phrase')
   const activePhraseIndex = phraseList.findIndex((p, idx) => {
@@ -229,6 +335,50 @@ export default function App() {
     return currentTime >= p.data.startTime && currentTime <= maxEnd
   })
   const activePhrase = activePhraseIndex >= 0 ? phraseList[activePhraseIndex] : null
+
+  // Target background music volume considering ducking depth
+  const duckingFactor = duckingPreset === 'soft' ? 0.32 : duckingPreset === 'hard' ? 0.12 : 0.20
+  const isDucked = autoDucking && !!activePhrase
+  const targetBgVolume = Math.max(0, Math.min(1, isDucked ? bgMusicVolume * duckingFactor : bgMusicVolume))
+
+  // Real-time preview Auto-Ducking: smoothly attenuate music during speech phrases
+  const prevBgPathRef = useRef<string | null>(null)
+  useEffect(() => {
+    if (!bgAudioRef.current || !bgMusicPath) return
+
+    // When selecting or changing audio track, initialize volume immediately
+    if (prevBgPathRef.current !== bgMusicPath) {
+      prevBgPathRef.current = bgMusicPath
+      bgAudioRef.current.volume = targetBgVolume
+      return
+    }
+
+    let animId: number
+    const startVol = bgAudioRef.current.volume
+    if (Math.abs(startVol - targetBgVolume) < 0.005) {
+      bgAudioRef.current.volume = targetBgVolume
+      return
+    }
+
+    const startTime = performance.now()
+    const rampDuration = 160 // 160ms smooth ducking ramp
+
+    const step = (now: number) => {
+      const elapsed = now - startTime
+      const progress = Math.min(1, elapsed / rampDuration)
+      const eased = progress < 0.5 ? 2 * progress * progress : -1 + (4 - 2 * progress) * progress
+      const nextVol = startVol + (targetBgVolume - startVol) * eased
+      if (bgAudioRef.current) {
+        bgAudioRef.current.volume = Math.max(0, Math.min(1, nextVol))
+      }
+      if (progress < 1) {
+        animId = requestAnimationFrame(step)
+      }
+    }
+
+    animId = requestAnimationFrame(step)
+    return () => cancelAnimationFrame(animId)
+  }, [targetBgVolume, bgMusicPath])
 
   // Evenly sampled phrases across duration for quick cover keyframe badges
   const sampledCoverPhrases = useMemo(() => {
@@ -520,10 +670,14 @@ export default function App() {
     if (isPlaying) {
       videoRef.current.pause()
       bgVideoRef.current?.pause()
+      bgAudioRef.current?.pause()
       setIsPlaying(false)
     } else {
       videoRef.current.play().catch(console.error)
       bgVideoRef.current?.play().catch(() => {})
+      if (bgMusicPath && bgAudioRef.current) {
+        bgAudioRef.current.play().catch(() => {})
+      }
       setIsPlaying(true)
     }
   }
@@ -539,6 +693,10 @@ export default function App() {
     }
     if (bgVideoRef.current) {
       bgVideoRef.current.currentTime = clamped
+    }
+    if (bgAudioRef.current && bgAudioRef.current.duration) {
+      const trimmedT = mapOriginalToTrimmed(clamped)
+      bgAudioRef.current.currentTime = trimmedT % bgAudioRef.current.duration
     }
   }
 
@@ -571,6 +729,13 @@ export default function App() {
       bgVideoRef.current.currentTime = t
     }
 
+    if (bgAudioRef.current && bgAudioRef.current.duration) {
+      const expAudio = mapOriginalToTrimmed(t) % bgAudioRef.current.duration
+      if (Math.abs(bgAudioRef.current.currentTime - expAudio) > 0.35) {
+        bgAudioRef.current.currentTime = expAudio
+      }
+    }
+
     if (videoRef.current.seeking || isSkippingRef.current) return
 
     const PAD_OUT = 0.12 // 120ms natural voice decay tail
@@ -601,6 +766,9 @@ export default function App() {
             bgVideoRef.current.currentTime = totalDuration
             bgVideoRef.current.pause()
           }
+          if (bgAudioRef.current) {
+            bgAudioRef.current.pause()
+          }
           videoRef.current.pause()
           setIsPlaying(false)
           isSkippingRef.current = false
@@ -609,6 +777,8 @@ export default function App() {
           if (bgVideoRef.current) {
             bgVideoRef.current.currentTime = targetTime
           }
+          // Note: Background music is continuous across video cuts, matching the exported audio timeline.
+          // Therefore, do NOT force bgAudioRef to seek on cut-skip.
           setTimeout(() => {
             isSkippingRef.current = false
           }, 40)
@@ -740,6 +910,10 @@ export default function App() {
         framingMode,
         colorPreset,
         targetBitrateKbps: null,
+        bgMusicPath,
+        bgMusicVolume,
+        autoDucking,
+        duckingPreset,
       })
       alert(`Видео сохранено:\n${outputPath}`)
     } catch (err) {
@@ -790,6 +964,10 @@ export default function App() {
         framingMode: 'blur_9_16',
         colorPreset,
         targetBitrateKbps: null,
+        bgMusicPath,
+        bgMusicVolume,
+        autoDucking,
+        duckingPreset,
       })
       alert(`Видео для Reels/Shorts успешно сохранено:\n${outputPath}`)
     } catch (err) {
@@ -845,6 +1023,10 @@ export default function App() {
         framingMode,
         colorPreset,
         targetBitrateKbps: targetBitrate,
+        bgMusicPath,
+        bgMusicVolume,
+        autoDucking,
+        duckingPreset,
       })
       alert(`Компактное видео для Telegram сохранено:\n${outputPath}`)
     } catch (err) {
@@ -868,7 +1050,7 @@ export default function App() {
         .filter(([start, end]) => end > start)
 
       const baseName = filePath.split(/[\\/]/).pop()?.replace(/\.[^/.]+$/, '') || 'audio'
-      const defaultName = `${baseName}_clean_voice.mp3`
+      const defaultName = bgMusicPath ? `${baseName}_audio_mix.mp3` : `${baseName}_clean_voice.mp3`
 
       const outputPath = await invoke<string | null>('select_save_file_cmd', {
         title: 'Экспорт аудио MP3 (320 kbps)',
@@ -885,8 +1067,12 @@ export default function App() {
         outputPath,
         totalDuration,
         bitrateKbps: 320,
+        bgMusicPath,
+        bgMusicVolume,
+        autoDucking,
+        duckingPreset,
       })
-      alert(`Чистый звук без пауз сохранён:\n${outputPath}`)
+      alert(`Аудиофайл успешно сохранён:\n${outputPath}`)
     } catch (err) {
       alert(`Ошибка экспорта аудио: ${err}`)
     } finally {
@@ -1104,6 +1290,31 @@ export default function App() {
             {burnSubtitles && (
               <span className="text-[10px] font-mono px-1 py-0.2 rounded bg-zinc-700 text-amber-300 uppercase">
                 {subtitlePreset}
+              </span>
+            )}
+          </button>
+
+          {/* Background Music Quick Button */}
+          <button
+            onClick={() => {
+              if (!bgMusicPath) {
+                handleSelectBgMusic()
+              } else {
+                setIsSettingsOpen(true)
+              }
+            }}
+            className={`h-7 px-2.5 rounded text-xs font-medium border flex items-center gap-1.5 transition ${
+              bgMusicPath
+                ? 'bg-indigo-950/70 text-indigo-300 border-indigo-700/80 hover:bg-indigo-900/60'
+                : 'bg-zinc-800/50 hover:bg-zinc-800 text-zinc-300 border-zinc-700/60'
+            }`}
+            title={bgMusicPath ? `Фоновая музыка: ${bgMusicName} (${Math.round(bgMusicVolume * 100)}%)` : 'Выбрать фоновую музыку'}
+          >
+            <Music className={`w-3.5 h-3.5 ${bgMusicPath ? 'text-indigo-400' : 'text-zinc-400'}`} />
+            <span className="hidden md:inline">Музыка</span>
+            {bgMusicPath && (
+              <span className="text-[10px] font-mono px-1 py-0.2 rounded bg-indigo-900/80 text-indigo-200">
+                {Math.round(bgMusicVolume * 100)}%
               </span>
             )}
           </button>
@@ -1360,17 +1571,65 @@ export default function App() {
                     onPlay={() => {
                       setIsPlaying(true)
                       bgVideoRef.current?.play().catch(() => {})
+                      if (bgMusicPath && bgAudioRef.current) {
+                        bgAudioRef.current.play().catch(() => {})
+                      }
                     }}
                     onPause={() => {
                       setIsPlaying(false)
                       bgVideoRef.current?.pause()
+                      bgAudioRef.current?.pause()
                     }}
                     onSeeked={() => {
-                      if (bgVideoRef.current && videoRef.current) {
-                        bgVideoRef.current.currentTime = videoRef.current.currentTime
+                      if (videoRef.current) {
+                        const ct = videoRef.current.currentTime
+                        if (bgVideoRef.current) {
+                          bgVideoRef.current.currentTime = ct
+                        }
+                        if (bgAudioRef.current && bgAudioRef.current.duration) {
+                          const trimmedT = mapOriginalToTrimmed(ct)
+                          bgAudioRef.current.currentTime = trimmedT % bgAudioRef.current.duration
+                        }
                       }
                     }}
+                    onEnded={() => {
+                      setIsPlaying(false)
+                      bgVideoRef.current?.pause()
+                      bgAudioRef.current?.pause()
+                    }}
                   />
+
+                  {/* Synchronized preview background music */}
+                  {bgMusicPath && (
+                    <audio
+                      ref={bgAudioRef}
+                      src={convertFileSrc(bgMusicPath)}
+                      loop
+                      preload="auto"
+                      onLoadedMetadata={(e) => {
+                        e.currentTarget.volume = targetBgVolume
+                        if (videoRef.current && e.currentTarget.duration) {
+                          const trimmedT = mapOriginalToTrimmed(videoRef.current.currentTime)
+                          e.currentTarget.currentTime = trimmedT % e.currentTarget.duration
+                        }
+                      }}
+                    />
+                  )}
+
+                  {/* Background Music Status Badge */}
+                  {bgMusicPath && (
+                    <div className="absolute top-2.5 left-2.5 z-20 flex items-center gap-1.5 px-2 py-1 rounded-md bg-black/75 backdrop-blur-md border border-zinc-700/60 text-[10px] font-mono text-zinc-200 shadow-md pointer-events-none">
+                      <Music className={`w-3 h-3 ${isPlaying ? 'text-indigo-400 animate-pulse' : 'text-zinc-400'}`} />
+                      <span className="max-w-[120px] truncate">{bgMusicName}</span>
+                      <span className="text-zinc-500">•</span>
+                      <span className="text-indigo-300 font-semibold">{Math.round(bgMusicVolume * 100)}%</span>
+                      {autoDucking && activePhrase && (
+                        <span className="px-1 py-0.2 rounded bg-amber-500/20 text-amber-300 text-[9px] font-sans font-medium uppercase tracking-wider">
+                          Ducked
+                        </span>
+                      )}
+                    </div>
+                  )}
                 </>
               ) : (
                 <div
@@ -1573,17 +1832,17 @@ export default function App() {
         {/* SETTINGS MODAL */}
         {isSettingsOpen && (
           <div className="absolute inset-0 bg-black/60 backdrop-blur-sm z-30 flex items-center justify-center p-4">
-            <div className="w-full max-w-lg bg-zinc-900 border border-zinc-800 rounded-xl shadow-2xl p-6 space-y-5 animate-in fade-in duration-150">
+            <div className="w-full max-w-lg max-h-[90vh] bg-zinc-900 border border-zinc-800 rounded-xl shadow-2xl p-6 flex flex-col animate-in fade-in duration-150">
               
               {/* Header */}
-              <div className="flex items-center justify-between pb-3 border-b border-zinc-800">
+              <div className="flex items-center justify-between pb-3 border-b border-zinc-800 flex-shrink-0">
                 <div className="flex items-center gap-2.5">
                   <div className="w-7 h-7 rounded bg-zinc-800 border border-zinc-700 flex items-center justify-center text-zinc-300">
                     <SlidersHorizontal className="w-4 h-4" />
                   </div>
                   <div>
                     <h2 className="text-sm font-semibold text-zinc-100">Настройки</h2>
-                    <p className="text-[11px] text-zinc-400">Параметры монтажа, субтитров и кодека</p>
+                    <p className="text-[11px] text-zinc-400">Параметры монтажа, субтитров и звука</p>
                   </div>
                 </div>
                 <button
@@ -1595,7 +1854,7 @@ export default function App() {
               </div>
 
               {/* Body Controls */}
-              <div className="space-y-4 text-xs">
+              <div className="space-y-4 text-xs overflow-y-auto pr-1 flex-1 py-2">
                 
                 {/* 1. Framing Mode */}
                 <div className="space-y-1.5">
@@ -1707,6 +1966,136 @@ export default function App() {
                       </button>
                     ))}
                   </div>
+                </div>
+
+                <div className="h-px bg-zinc-800 my-2" />
+
+                {/* 4. Background Music & Auto-Ducking */}
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <label className="font-medium text-zinc-200 flex items-center gap-1.5">
+                      <Music className="w-3.5 h-3.5 text-indigo-400" />
+                      <span>Фоновая музыка</span>
+                    </label>
+                    {bgMusicPath ? (
+                      <span className="font-mono text-[11px] text-indigo-400 font-medium">
+                        {Math.round(bgMusicVolume * 100)}% {autoDucking ? `(Авто: ${duckingPreset === 'soft' ? '-10' : duckingPreset === 'hard' ? '-18' : '-14'} dB)` : ''}
+                      </span>
+                    ) : (
+                      <span className="text-[11px] text-zinc-500">Не выбрана</span>
+                    )}
+                  </div>
+
+                  {!bgMusicPath ? (
+                    <button
+                      onClick={handleSelectBgMusic}
+                      className="w-full h-8 rounded bg-indigo-950/40 hover:bg-indigo-900/50 border border-indigo-700/60 hover:border-indigo-500 text-indigo-200 flex items-center justify-center gap-2 text-xs font-medium transition"
+                    >
+                      <Music className="w-3.5 h-3.5 text-indigo-400" />
+                      <span>Выбрать фоновую музыку</span>
+                    </button>
+                  ) : (
+                    <div className="space-y-2.5 bg-zinc-950/70 p-2.5 rounded-lg border border-zinc-800">
+                      {/* Track Info & Actions */}
+                      <div className="flex items-center justify-between gap-2 bg-zinc-900/90 px-2.5 py-1.5 rounded border border-zinc-800/80">
+                        <div className="flex items-center gap-2 min-w-0">
+                          <Music className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+                          <span className="text-[11px] font-mono text-zinc-200 truncate" title={bgMusicPath}>
+                            {bgMusicName}
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          <button
+                            onClick={handleSelectBgMusic}
+                            className="text-[10px] text-zinc-400 hover:text-zinc-200 underline px-1 transition"
+                            title="Выбрать другой файл"
+                          >
+                            Заменить
+                          </button>
+                          <button
+                            onClick={handleClearBgMusic}
+                            className="w-5 h-5 rounded hover:bg-zinc-800 text-zinc-400 hover:text-red-400 flex items-center justify-center transition"
+                            title="Удалить трек"
+                          >
+                            <X className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Music Volume Slider */}
+                      <div className="space-y-1">
+                        <div className="flex items-center justify-between text-[11px]">
+                          <span className="text-zinc-400">Громкость музыки</span>
+                          <span className="font-mono text-zinc-200">{Math.round(bgMusicVolume * 100)}%</span>
+                        </div>
+                        <input
+                          type="range"
+                          min="0"
+                          max="1"
+                          step="0.01"
+                          value={bgMusicVolume}
+                          onChange={(e) => setBgMusicVolume(parseFloat(e.target.value))}
+                          className="w-full accent-indigo-500 bg-zinc-800 h-1.5 rounded-lg cursor-pointer"
+                        />
+                        <div className="flex justify-between text-[9px] text-zinc-600 font-mono">
+                          <span>0%</span>
+                          <span>15% (по умолчанию)</span>
+                          <span>100%</span>
+                        </div>
+                      </div>
+
+                      {/* Auto-Ducking Toggle & Presets */}
+                      <div className="pt-2 border-t border-zinc-800/80 space-y-2">
+                        <label className="flex items-start gap-2.5 cursor-pointer select-none">
+                          <input
+                            type="checkbox"
+                            checked={autoDucking}
+                            onChange={(e) => setAutoDucking(e.target.checked)}
+                            className="mt-0.5 accent-indigo-500 rounded cursor-pointer"
+                          />
+                          <div>
+                            <div className="text-xs font-semibold text-zinc-200 flex items-center gap-1.5">
+                              <span>Авто-приглушение (Auto-Ducking)</span>
+                              <span className="text-[10px] px-1 py-0.2 rounded bg-indigo-950 text-indigo-300 font-normal">
+                                Речь на первом плане
+                              </span>
+                            </div>
+                            <p className="text-[10px] text-zinc-400 leading-snug mt-0.5">
+                              Музыка автоматически стихает при речи и плавно возвращается на паузах
+                            </p>
+                          </div>
+                        </label>
+
+                        {autoDucking && (
+                          <div className="pl-6 space-y-1 animate-in fade-in duration-100">
+                            <span className="text-[10px] text-zinc-400">Глубина приглушения:</span>
+                            <div className="grid grid-cols-3 gap-2">
+                              {[
+                                { id: 'soft' as const, label: 'Мягкое (-10 dB)', desc: 'Легкий спад' },
+                                { id: 'medium' as const, label: 'Стандарт (-14 dB)', desc: 'Сбалансированно' },
+                                { id: 'hard' as const, label: 'Глубокое (-18 dB)', desc: 'Максимум голоса' },
+                              ].map((dp) => (
+                                <button
+                                  key={dp.id}
+                                  onClick={() => setDuckingPreset(dp.id)}
+                                  className={`p-1.5 rounded border text-left transition ${
+                                    duckingPreset === dp.id
+                                      ? 'bg-zinc-100 text-zinc-950 border-white'
+                                      : 'bg-zinc-900 text-zinc-400 border-zinc-800 hover:text-zinc-200'
+                                  }`}
+                                >
+                                  <div className="font-semibold text-[10px]">{dp.label}</div>
+                                  <div className={`text-[9px] ${duckingPreset === dp.id ? 'text-zinc-700' : 'text-zinc-500'}`}>
+                                    {dp.desc}
+                                  </div>
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
                 </div>
 
                 <div className="h-px bg-zinc-800 my-2" />
@@ -1936,7 +2325,7 @@ export default function App() {
               </div>
 
               {/* Footer */}
-              <div className="flex justify-end pt-3 border-t border-zinc-800">
+              <div className="flex justify-end pt-3 border-t border-zinc-800 flex-shrink-0 mt-2">
                 <button
                   onClick={() => setIsSettingsOpen(false)}
                   className="h-8 px-4 rounded bg-zinc-100 hover:bg-white text-zinc-950 text-xs font-semibold transition"

@@ -780,16 +780,71 @@ pub fn export_cover_image(
     Ok(())
 }
 
-/// Exports audio-only trimmed track (MP3 320 kbps) without pauses
+/// Builds the FFmpeg filter complex fragment for background music mixing with optional sidechain auto-ducking.
+/// Unifies sample rates (48000 Hz) and channel layouts (stereo) to guarantee consistent high-fidelity mixing
+/// regardless of whether the voice recording is mono/stereo or the background music is stereo/surround.
+pub fn build_background_audio_filter(
+    has_audio: bool,
+    voice_tag: &str,
+    bg_input_idx: usize,
+    bg_music_volume: f64,
+    auto_ducking: bool,
+    ducking_preset: Option<&str>,
+    trimmed_duration: f64,
+) -> String {
+    let bg_vol = bg_music_volume.clamp(0.0, 1.0);
+    let (th, ra, att, rel) = match ducking_preset.unwrap_or("medium") {
+        "soft" => ("0.04", "5", "20", "350"),
+        "hard" => ("0.02", "14", "20", "400"),
+        _ => ("0.03", "8", "20", "350"),
+    };
+
+    if has_audio {
+        if auto_ducking {
+            format!(
+                "[{bg_input_idx}:a]aloop=loop=-1:size=2e+09,volume={bg_vol:.3},aformat=channel_layouts=stereo:sample_rates=48000[bg_raw];\
+                 {voice_tag}aformat=channel_layouts=stereo:sample_rates=48000,asplit=2[voice_mix][voice_sc];\
+                 [bg_raw][voice_sc]sidechaincompress=threshold={th}:ratio={ra}:attack={att}:release={rel}[ducked_bg];\
+                 [voice_mix][ducked_bg]amix=inputs=2:duration=first:dropout_transition=2:normalize=0,aformat=channel_layouts=stereo:sample_rates=48000[outa]"
+            )
+        } else {
+            format!(
+                "[{bg_input_idx}:a]aloop=loop=-1:size=2e+09,volume={bg_vol:.3},aformat=channel_layouts=stereo:sample_rates=48000[bg_raw];\
+                 {voice_tag}aformat=channel_layouts=stereo:sample_rates=48000[voice_mix];\
+                 [voice_mix][bg_raw]amix=inputs=2:duration=first:dropout_transition=2:normalize=0,aformat=channel_layouts=stereo:sample_rates=48000[outa]"
+            )
+        }
+    } else {
+        format!(
+            "[{bg_input_idx}:a]aloop=loop=-1:size=2e+09,volume={bg_vol:.3},atrim=0:{trimmed_duration:.3},aformat=channel_layouts=stereo:sample_rates=48000[outa]"
+        )
+    }
+}
+
+/// Exports audio-only trimmed track (MP3 320 kbps) without pauses, optionally mixed with background music
 pub fn export_audio_only(
     input_path: &str,
     cut_intervals: &[(f64, f64)],
     total_duration: f64,
     output_path: &str,
     bitrate_kbps: u32,
+    bg_music_path: Option<&str>,
+    bg_music_volume: f64,
+    auto_ducking: bool,
+    ducking_preset: Option<&str>,
 ) -> Result<(), String> {
-    if !has_audio_stream(input_path) {
+    let has_audio = has_audio_stream(input_path);
+    let has_bg = bg_music_path.map_or(false, |p| !p.trim().is_empty());
+
+    if !has_audio && !has_bg {
         return Err("В исходном видеофайле нет аудиодорожки для экспорта".into());
+    }
+
+    if let Some(bg_path) = bg_music_path {
+        let trimmed = bg_path.trim();
+        if !trimmed.is_empty() && !std::path::Path::new(trimmed).exists() {
+            return Err(format!("Фоновый аудиофайл не найден: {}", trimmed));
+        }
     }
 
     let keep_intervals = calculate_keep_intervals(cut_intervals, total_duration);
@@ -797,37 +852,68 @@ pub fn export_audio_only(
         return Err("Все фрагменты аудио вырезаны".into());
     }
 
+    let trimmed_duration: f64 = keep_intervals.iter().map(|(s, e)| e - s).sum();
     let mut filter_complex = String::new();
-    let mut concat_inputs = String::new();
+    let voice_concat_tag = if has_bg && has_audio { "[voice_concat]" } else { "[outa]" };
 
-    for (i, &(start, end)) in keep_intervals.iter().enumerate() {
-        let dur = end - start;
-        let fade_len = (dur * 0.10).min(0.025);
-        if fade_len >= 0.005 {
-            filter_complex.push_str(&format!(
-                "[0:a]atrim=start={:.3}:end={:.3},asetpts=PTS-STARTPTS,afade=t=in:st=0:d={:.3},afade=t=out:st={:.3}:d={:.3}[a{}];",
-                start, end, fade_len, (dur - fade_len).max(0.0), fade_len, i
-            ));
-        } else {
-            filter_complex.push_str(&format!(
-                "[0:a]atrim=start={:.3}:end={:.3},asetpts=PTS-STARTPTS[a{}];",
-                start, end, i
-            ));
+    if has_audio {
+        let mut concat_inputs = String::new();
+        for (i, &(start, end)) in keep_intervals.iter().enumerate() {
+            let dur = end - start;
+            let fade_len = (dur * 0.10).min(0.025);
+            if fade_len >= 0.005 {
+                filter_complex.push_str(&format!(
+                    "[0:a]atrim=start={:.3}:end={:.3},asetpts=PTS-STARTPTS,afade=t=in:st=0:d={:.3},afade=t=out:st={:.3}:d={:.3}[a{}];",
+                    start, end, fade_len, (dur - fade_len).max(0.0), fade_len, i
+                ));
+            } else {
+                filter_complex.push_str(&format!(
+                    "[0:a]atrim=start={:.3}:end={:.3},asetpts=PTS-STARTPTS[a{}];",
+                    start, end, i
+                ));
+            }
+            concat_inputs.push_str(&format!("[a{}]", i));
         }
-        concat_inputs.push_str(&format!("[a{}]", i));
+
+        filter_complex.push_str(&format!(
+            "{}concat=n={}:v=0:a=1{}",
+            concat_inputs,
+            keep_intervals.len(),
+            voice_concat_tag
+        ));
     }
 
-    filter_complex.push_str(&format!(
-        "{}concat=n={}:v=0:a=1[outa]",
-        concat_inputs,
-        keep_intervals.len()
-    ));
+    if has_bg {
+        let bg_input_idx = 1;
+        if has_audio {
+            filter_complex.push_str(";");
+        }
+        let bg_filter = build_background_audio_filter(
+            has_audio,
+            "[voice_concat]",
+            bg_input_idx,
+            bg_music_volume,
+            auto_ducking,
+            ducking_preset,
+            trimmed_duration,
+        );
+        filter_complex.push_str(&bg_filter);
+    }
 
-    let args = vec![
+    let mut args = vec![
         "-y".to_string(),
         "-hide_banner".to_string(),
         "-i".to_string(),
         input_path.to_string(),
+    ];
+
+    if has_bg {
+        if let Some(bg_path) = bg_music_path {
+            args.extend(vec!["-i".to_string(), bg_path.trim().to_string()]);
+        }
+    }
+
+    args.extend(vec![
         "-filter_complex".to_string(),
         filter_complex,
         "-map".to_string(),
@@ -837,7 +923,7 @@ pub fn export_audio_only(
         "-b:a".to_string(),
         format!("{}k", bitrate_kbps.max(64)),
         output_path.to_string(),
-    ];
+    ]);
 
     let output = new_command("ffmpeg")
         .args(&args)
@@ -868,6 +954,10 @@ pub fn export_trimmed_video(
     framing_mode: &str,
     color_preset: &str,
     target_bitrate_kbps: Option<u32>,
+    bg_music_path: Option<&str>,
+    bg_music_volume: f64,
+    auto_ducking: bool,
+    ducking_preset: Option<&str>,
 ) -> Result<(), String> {
     let keep_intervals = calculate_keep_intervals(cut_intervals, total_duration);
 
@@ -876,6 +966,14 @@ pub fn export_trimmed_video(
     }
 
     let has_audio = has_audio_stream(input_path);
+    let has_bg = bg_music_path.map_or(false, |p| !p.trim().is_empty());
+
+    if let Some(bg_path) = bg_music_path {
+        let trimmed = bg_path.trim();
+        if !trimmed.is_empty() && !std::path::Path::new(trimmed).exists() {
+            return Err(format!("Фоновый аудиофайл не найден: {}", trimmed));
+        }
+    }
 
     // Subtitle file generation (if enabled) in temporary directory
     let temp_file_name = format!(
@@ -927,7 +1025,11 @@ pub fn export_trimmed_video(
     }
 
     let audio_param = if has_audio { "a=1" } else { "a=0" };
-    let audio_out_tag = if has_audio { "[outa]" } else { "" };
+    let audio_out_tag = if has_audio {
+        if has_bg { "[voice_concat]" } else { "[outa]" }
+    } else {
+        ""
+    };
 
     filter_complex.push_str(&format!(
         "{}concat=n={}:v=1:{}[v_concat]{};",
@@ -968,6 +1070,22 @@ pub fn export_trimmed_video(
         filter_complex.push_str(&format!("{cur_v}null[outv]"));
     }
 
+    if has_bg {
+        let trimmed_dur: f64 = keep_intervals.iter().map(|(s, e)| e - s).sum();
+        let bg_filter = build_background_audio_filter(
+            has_audio,
+            "[voice_concat]",
+            1,
+            bg_music_volume,
+            auto_ducking,
+            ducking_preset,
+            trimmed_dur,
+        );
+        filter_complex.push_str(&format!(";{}", bg_filter));
+    }
+
+    let has_output_audio = has_audio || has_bg;
+
     // Select Video Encoder (GPU NVENC vs CPU libx264)
     let use_nvenc = hardware_accel == "nvenc" || hardware_accel == "auto";
 
@@ -976,13 +1094,22 @@ pub fn export_trimmed_video(
         "-hide_banner".to_string(),
         "-i".to_string(),
         input_path.to_string(),
+    ];
+
+    if has_bg {
+        if let Some(bg_path) = bg_music_path {
+            base_args.extend(vec!["-i".to_string(), bg_path.trim().to_string()]);
+        }
+    }
+
+    base_args.extend(vec![
         "-filter_complex".to_string(),
         filter_complex.clone(),
         "-map".to_string(),
         "[outv]".to_string(),
-    ];
+    ]);
 
-    if has_audio {
+    if has_output_audio {
         base_args.extend(vec!["-map".to_string(), "[outa]".to_string()]);
     }
 
@@ -1016,7 +1143,7 @@ pub fn export_trimmed_video(
                 format!("{}k", buf_size),
             ]);
         }
-        if has_audio {
+        if has_output_audio {
             base_args.extend(vec![
                 "-c:a".to_string(),
                 "aac".to_string(),
@@ -1044,7 +1171,7 @@ pub fn export_trimmed_video(
                 "18".to_string(),
             ]);
         }
-        if has_audio {
+        if has_output_audio {
             base_args.extend(vec![
                 "-c:a".to_string(),
                 "aac".to_string(),
@@ -1054,7 +1181,7 @@ pub fn export_trimmed_video(
         }
     }
 
-    if !has_audio {
+    if !has_output_audio {
         base_args.push("-an".to_string());
     }
 
@@ -1069,12 +1196,19 @@ pub fn export_trimmed_video(
             "-hide_banner".to_string(),
             "-i".to_string(),
             input_path.to_string(),
+        ];
+        if has_bg {
+            if let Some(bg_path) = bg_music_path {
+                cpu_args.extend(vec!["-i".to_string(), bg_path.trim().to_string()]);
+            }
+        }
+        cpu_args.extend(vec![
             "-filter_complex".to_string(),
             filter_complex,
             "-map".to_string(),
             "[outv]".to_string(),
-        ];
-        if has_audio {
+        ]);
+        if has_output_audio {
             cpu_args.extend(vec!["-map".to_string(), "[outa]".to_string()]);
         }
         if let Some(br) = target_bitrate_kbps {
@@ -1092,7 +1226,7 @@ pub fn export_trimmed_video(
                 "-bufsize".to_string(),
                 format!("{}k", buf_size),
             ]);
-            if has_audio {
+            if has_output_audio {
                 cpu_args.extend(vec![
                     "-c:a".to_string(),
                     "aac".to_string(),
@@ -1109,7 +1243,7 @@ pub fn export_trimmed_video(
                 "-crf".to_string(),
                 "18".to_string(),
             ]);
-            if has_audio {
+            if has_output_audio {
                 cpu_args.extend(vec![
                     "-c:a".to_string(),
                     "aac".to_string(),
@@ -1118,7 +1252,7 @@ pub fn export_trimmed_video(
                 ]);
             }
         }
-        if !has_audio {
+        if !has_output_audio {
             cpu_args.push("-an".to_string());
         }
         cpu_args.push(output_path.to_string());
@@ -1465,8 +1599,55 @@ mod tests {
 
     #[test]
     fn test_export_audio_only_no_audio() {
-        let res = export_audio_only("non_existent_file.mp4", &[(0.0, 1.0)], 10.0, "out.mp3", 320);
+        let res = export_audio_only("non_existent_file.mp4", &[(0.0, 1.0)], 10.0, "out.mp3", 320, None, 0.15, true, None);
         assert!(res.is_err());
         assert!(res.unwrap_err().contains("нет аудиодорожки"));
+    }
+
+    #[test]
+    fn test_build_background_audio_filter_autoducking_presets() {
+        // Soft preset (-10 dB attenuation)
+        let f_soft = build_background_audio_filter(true, "[voice_concat]", 1, 0.20, true, Some("soft"), 15.0);
+        assert!(f_soft.contains("[1:a]aloop=loop=-1:size=2e+09,volume=0.200,aformat=channel_layouts=stereo:sample_rates=48000[bg_raw]"));
+        assert!(f_soft.contains("[voice_concat]aformat=channel_layouts=stereo:sample_rates=48000,asplit=2[voice_mix][voice_sc]"));
+        assert!(f_soft.contains("sidechaincompress=threshold=0.04:ratio=5:attack=20:release=350[ducked_bg]"));
+        assert!(f_soft.contains("[voice_mix][ducked_bg]amix=inputs=2:duration=first:dropout_transition=2:normalize=0,aformat=channel_layouts=stereo:sample_rates=48000[outa]"));
+
+        // Medium preset (-14 dB attenuation, default)
+        let f_med = build_background_audio_filter(true, "[voice_concat]", 1, 0.15, true, Some("medium"), 15.0);
+        assert!(f_med.contains("threshold=0.03:ratio=8:attack=20:release=350"));
+
+        // Hard preset (-18 dB attenuation)
+        let f_hard = build_background_audio_filter(true, "[voice_concat]", 1, 0.15, true, Some("hard"), 15.0);
+        assert!(f_hard.contains("threshold=0.02:ratio=14:attack=20:release=400"));
+    }
+
+    #[test]
+    fn test_build_background_audio_filter_no_ducking() {
+        let f = build_background_audio_filter(true, "[voice_concat]", 1, 0.15, false, None, 15.0);
+        assert!(f.contains("[1:a]aloop=loop=-1:size=2e+09,volume=0.150,aformat=channel_layouts=stereo:sample_rates=48000[bg_raw]"));
+        assert!(f.contains("[voice_concat]aformat=channel_layouts=stereo:sample_rates=48000[voice_mix]"));
+        assert!(!f.contains("sidechaincompress"));
+        assert!(f.contains("[voice_mix][bg_raw]amix=inputs=2:duration=first:dropout_transition=2:normalize=0,aformat=channel_layouts=stereo:sample_rates=48000[outa]"));
+    }
+
+    #[test]
+    fn test_build_background_audio_filter_video_without_audio() {
+        let f = build_background_audio_filter(false, "[voice_concat]", 1, 0.15, true, None, 12.345);
+        assert_eq!(
+            f,
+            "[1:a]aloop=loop=-1:size=2e+09,volume=0.150,atrim=0:12.345,aformat=channel_layouts=stereo:sample_rates=48000[outa]"
+        );
+    }
+
+    #[test]
+    fn test_build_background_audio_filter_volume_clamp() {
+        // Underflow clamp to 0.0
+        let f_neg = build_background_audio_filter(false, "[voice_concat]", 1, -0.5, false, None, 10.0);
+        assert!(f_neg.contains("volume=0.000"));
+
+        // Overflow clamp to 1.0
+        let f_over = build_background_audio_filter(false, "[voice_concat]", 1, 2.5, false, None, 10.0);
+        assert!(f_over.contains("volume=1.000"));
     }
 }
