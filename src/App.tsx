@@ -156,6 +156,7 @@ export default function App() {
   const [showPauses, setShowPauses] = useState<boolean>(true)
   const [waveform, setWaveform] = useState<number[]>(DEFAULT_WAVEFORM)
   const [isAnalyzing, setIsAnalyzing] = useState<boolean>(false)
+  const [analyzingStatus, setAnalyzingStatus] = useState<string>('')
   const [isExporting, setIsExporting] = useState<boolean>(false)
   const [searchQuery, setSearchQuery] = useState<string>('')
 
@@ -198,12 +199,14 @@ export default function App() {
       setVideoSrc(convertFileSrc(selected))
 
       // 1. Get real duration
+      setAnalyzingStatus('Анализ параметров видео...')
       const dur = await invoke<number>('get_video_duration_cmd', { path: selected })
       if (dur && dur > 0) {
         setTotalDuration(dur)
       }
 
       // 2. Detect pauses via FFmpeg
+      setAnalyzingStatus('Поиск пауз и тишины...')
       const detectedGaps = await invoke<SilenceGap[]>('detect_silence_cmd', {
         path: selected,
         thresholdDb: silenceThreshold,
@@ -211,6 +214,7 @@ export default function App() {
       })
 
       // 3. Extract real waveform peaks
+      setAnalyzingStatus('Построение звуковой дорожки...')
       const peaks = await invoke<number[]>('extract_waveform_cmd', {
         path: selected,
         points: 140,
@@ -220,6 +224,7 @@ export default function App() {
       }
 
       // 4. Transcribe speech using Whisper AI with word timestamps
+      setAnalyzingStatus('Распознавание речи через Whisper (пословные таймкоды)...')
       let phrases: Phrase[] = []
       try {
         phrases = await invoke<Phrase[]>('transcribe_speech_cmd', {
@@ -287,6 +292,7 @@ export default function App() {
       alert(`Ошибка анализа видео: ${err}`)
     } finally {
       setIsAnalyzing(false)
+      setAnalyzingStatus('')
     }
   }
 
@@ -295,6 +301,7 @@ export default function App() {
     if (!filePath) return
     try {
       setIsAnalyzing(true)
+      setAnalyzingStatus('Пересчёт пауз с новыми порогами...')
       const detectedGaps = await invoke<SilenceGap[]>('detect_silence_cmd', {
         path: filePath,
         thresholdDb: silenceThreshold,
@@ -360,6 +367,7 @@ export default function App() {
       alert(`Ошибка пересчета пауз: ${err}`)
     } finally {
       setIsAnalyzing(false)
+      setAnalyzingStatus('')
     }
   }
 
@@ -653,7 +661,7 @@ export default function App() {
           >
             <FolderOpen className="w-3.5 h-3.5 text-zinc-400 flex-shrink-0" />
             <span className="font-mono truncate">
-              {isAnalyzing ? 'Анализ через FFmpeg...' : fileName}
+              {isAnalyzing ? (analyzingStatus || 'Анализ через FFmpeg...') : fileName}
             </span>
           </button>
 
@@ -1231,6 +1239,39 @@ export default function App() {
                 </button>
               </div>
 
+            </div>
+          </div>
+        )}
+
+        {/* 2.6 FULLSCREEN PROGRESS OVERLAYS (No frozen white screens!) */}
+        {isAnalyzing && (
+          <div className="absolute inset-0 bg-black/75 backdrop-blur-sm z-50 flex items-center justify-center p-4 select-none">
+            <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-6 shadow-2xl flex items-center gap-4 max-w-md w-full animate-in fade-in duration-150">
+              <RefreshCw className="w-6 h-6 text-amber-400 animate-spin flex-shrink-0" />
+              <div className="flex-1 min-w-0">
+                <div className="text-xs font-semibold text-zinc-100 uppercase tracking-wide">
+                  Обработка видео
+                </div>
+                <div className="text-xs text-zinc-400 mt-1 truncate">
+                  {analyzingStatus || 'Анализ через FFmpeg...'}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {isExporting && (
+          <div className="absolute inset-0 bg-black/75 backdrop-blur-sm z-50 flex items-center justify-center p-4 select-none">
+            <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-6 shadow-2xl flex items-center gap-4 max-w-md w-full animate-in fade-in duration-150">
+              <Zap className="w-6 h-6 text-emerald-400 animate-pulse flex-shrink-0" />
+              <div className="flex-1 min-w-0">
+                <div className="text-xs font-semibold text-zinc-100 uppercase tracking-wide">
+                  Монтаж и экспорт видео
+                </div>
+                <div className="text-xs text-zinc-400 mt-1">
+                  {hardwareAccel === 'cpu' ? 'Рендер через процессор (CPU)...' : 'Аппаратный рендер NVIDIA NVENC...'}
+                </div>
+              </div>
             </div>
           </div>
         )}

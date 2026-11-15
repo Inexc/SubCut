@@ -1,6 +1,20 @@
 use serde::{Deserialize, Serialize};
 use std::process::Command;
 
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+
+#[allow(dead_code)]
+pub const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+/// Creates a Command with CREATE_NO_WINDOW on Windows to prevent any console window popup
+pub fn new_command(program: &str) -> Command {
+    let mut cmd = Command::new(program);
+    #[cfg(target_os = "windows")]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    cmd
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SilenceGap {
     pub id: String,
@@ -300,7 +314,7 @@ pub fn detect_silence(
     min_duration: f64,
 ) -> Result<Vec<SilenceGap>, String> {
     let filter = format!("silencedetect=noise={}dB:d={}", threshold_db, min_duration);
-    let output = Command::new("ffmpeg")
+    let output = new_command("ffmpeg")
         .args(&[
             "-hide_banner",
             "-vn",
@@ -368,7 +382,7 @@ pub fn detect_silence(
 
 /// Extracts downsampled RMS waveform peaks (0..100) for UI Canvas
 pub fn extract_waveform(path: &str, points: usize) -> Result<Vec<u8>, String> {
-    let output = Command::new("ffmpeg")
+    let output = new_command("ffmpeg")
         .args(&[
             "-hide_banner",
             "-vn",
@@ -523,7 +537,7 @@ pub fn export_trimmed_video(
         output_path.to_string(),
     ]);
 
-    let mut output = Command::new("ffmpeg").args(&base_args).output();
+    let mut output = new_command("ffmpeg").args(&base_args).output();
 
     // If NVENC failed and auto was selected, try CPU fallback
     if use_nvenc && (output.is_err() || !output.as_ref().unwrap().status.success()) {
@@ -550,7 +564,7 @@ pub fn export_trimmed_video(
             "192k".to_string(),
             output_path.to_string(),
         ];
-        output = Command::new("ffmpeg").args(&cpu_args).output();
+        output = new_command("ffmpeg").args(&cpu_args).output();
     }
 
     // Clean up temporary ASS file
@@ -571,7 +585,7 @@ pub fn export_trimmed_video(
 /// Transcribes speech using faster-whisper INT8 helper with configurable model and word timestamps
 pub fn transcribe_speech(path: &str, model_size: &str) -> Result<Vec<Phrase>, String> {
     let script_path = concat!(env!("CARGO_MANIFEST_DIR"), "\\transcribe.py");
-    let output = Command::new("python")
+    let output = new_command("python")
         .env("PYTHONIOENCODING", "utf-8")
         .args(&[script_path, path, model_size])
         .output()

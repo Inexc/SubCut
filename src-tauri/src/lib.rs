@@ -4,26 +4,10 @@ use ffmpeg::{
     detect_silence, export_project_edl, export_subtitles_srt, export_trimmed_video,
     extract_waveform, Phrase, SilenceGap,
 };
-use std::process::Command;
 
-#[tauri::command]
-fn detect_silence_cmd(
-    path: String,
-    threshold_db: f64,
-    min_duration: f64,
-) -> Result<Vec<SilenceGap>, String> {
-    detect_silence(&path, threshold_db, min_duration)
-}
-
-#[tauri::command]
-fn extract_waveform_cmd(path: String, points: usize) -> Result<Vec<u8>, String> {
-    extract_waveform(&path, points)
-}
-
-#[tauri::command]
-fn get_video_duration_cmd(path: String) -> Result<f64, String> {
+fn get_video_duration(path: &str) -> f64 {
     // 1. Try ffprobe format=duration
-    if let Ok(output) = Command::new("ffprobe")
+    if let Ok(output) = ffmpeg::new_command("ffprobe")
         .args(&[
             "-v",
             "error",
@@ -31,20 +15,20 @@ fn get_video_duration_cmd(path: String) -> Result<f64, String> {
             "format=duration",
             "-of",
             "default=noprint_wrappers=1:nokey=1",
-            &path,
+            path,
         ])
         .output()
     {
         let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
         if let Ok(dur) = s.parse::<f64>() {
             if dur > 0.0 {
-                return Ok(dur);
+                return dur;
             }
         }
     }
 
     // 2. Try ffprobe stream=duration
-    if let Ok(output) = Command::new("ffprobe")
+    if let Ok(output) = ffmpeg::new_command("ffprobe")
         .args(&[
             "-v",
             "error",
@@ -54,21 +38,21 @@ fn get_video_duration_cmd(path: String) -> Result<f64, String> {
             "stream=duration",
             "-of",
             "default=noprint_wrappers=1:nokey=1",
-            &path,
+            path,
         ])
         .output()
     {
         let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
         if let Ok(dur) = s.parse::<f64>() {
             if dur > 0.0 {
-                return Ok(dur);
+                return dur;
             }
         }
     }
 
     // 3. Fallback: Parse "Duration: 00:00:20.39" from `ffmpeg -i <path>`
-    if let Ok(output) = Command::new("ffmpeg")
-        .args(&["-hide_banner", "-i", &path])
+    if let Ok(output) = ffmpeg::new_command("ffmpeg")
+        .args(&["-hide_banner", "-i", path])
         .output()
     {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -83,23 +67,52 @@ fn get_video_duration_cmd(path: String) -> Result<f64, String> {
                     let s: f64 = parts[2].trim().parse().unwrap_or(0.0);
                     let total = h * 3600.0 + m * 60.0 + s;
                     if total > 0.0 {
-                        return Ok(total);
+                        return total;
                     }
                 }
             }
         }
     }
 
-    Ok(10.0)
+    10.0
 }
 
 #[tauri::command]
-fn transcribe_speech_cmd(
+async fn detect_silence_cmd(
+    path: String,
+    threshold_db: f64,
+    min_duration: f64,
+) -> Result<Vec<SilenceGap>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        detect_silence(&path, threshold_db, min_duration)
+    })
+    .await
+    .map_err(|e| format!("Task error: {}", e))?
+}
+
+#[tauri::command]
+async fn extract_waveform_cmd(path: String, points: usize) -> Result<Vec<u8>, String> {
+    tauri::async_runtime::spawn_blocking(move || extract_waveform(&path, points))
+        .await
+        .map_err(|e| format!("Task error: {}", e))?
+}
+
+#[tauri::command]
+async fn get_video_duration_cmd(path: String) -> Result<f64, String> {
+    tauri::async_runtime::spawn_blocking(move || Ok(get_video_duration(&path)))
+        .await
+        .map_err(|e| format!("Task error: {}", e))?
+}
+
+#[tauri::command]
+async fn transcribe_speech_cmd(
     path: String,
     model_size: Option<String>,
 ) -> Result<Vec<Phrase>, String> {
     let model = model_size.unwrap_or_else(|| "base".to_string());
-    ffmpeg::transcribe_speech(&path, &model)
+    tauri::async_runtime::spawn_blocking(move || ffmpeg::transcribe_speech(&path, &model))
+        .await
+        .map_err(|e| format!("Task error: {}", e))?
 }
 
 #[tauri::command]
@@ -115,7 +128,7 @@ if ($f.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
     [Console]::Out.WriteLine($f.FileName)
 }
 "#;
-    let output = Command::new("powershell")
+    let output = ffmpeg::new_command("powershell")
         .args(&["-NoProfile", "-Command", script])
         .output()
         .ok()?;
@@ -154,7 +167,7 @@ if ($f.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{
 "#,
         title, default_name, filter
     );
-    let output = Command::new("powershell")
+    let output = ffmpeg::new_command("powershell")
         .args(&["-NoProfile", "-Command", &script])
         .output()
         .ok()?;
@@ -168,7 +181,7 @@ if ($f.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{
 }
 
 #[tauri::command]
-fn export_trimmed_video_cmd(
+async fn export_trimmed_video_cmd(
     input_path: String,
     cuts: Vec<(f64, f64)>,
     output_path: String,
@@ -178,30 +191,38 @@ fn export_trimmed_video_cmd(
     phrases: Vec<Phrase>,
     hardware_accel: String,
 ) -> Result<(), String> {
-    export_trimmed_video(
-        &input_path,
-        &cuts,
-        &output_path,
-        total_duration,
-        burn_subtitles,
-        &subtitle_preset,
-        &phrases,
-        &hardware_accel,
-    )
+    tauri::async_runtime::spawn_blocking(move || {
+        export_trimmed_video(
+            &input_path,
+            &cuts,
+            &output_path,
+            total_duration,
+            burn_subtitles,
+            &subtitle_preset,
+            &phrases,
+            &hardware_accel,
+        )
+    })
+    .await
+    .map_err(|e| format!("Task error: {}", e))?
 }
 
 #[tauri::command]
-fn export_subtitles_srt_cmd(
+async fn export_subtitles_srt_cmd(
     output_path: String,
     cuts: Vec<(f64, f64)>,
     total_duration: f64,
     phrases: Vec<Phrase>,
 ) -> Result<(), String> {
-    export_subtitles_srt(&phrases, &cuts, total_duration, &output_path)
+    tauri::async_runtime::spawn_blocking(move || {
+        export_subtitles_srt(&phrases, &cuts, total_duration, &output_path)
+    })
+    .await
+    .map_err(|e| format!("Task error: {}", e))?
 }
 
 #[tauri::command]
-fn export_project_edl_cmd(
+async fn export_project_edl_cmd(
     output_path: String,
     input_path: String,
     cuts: Vec<(f64, f64)>,
@@ -209,7 +230,11 @@ fn export_project_edl_cmd(
     fps: Option<f64>,
 ) -> Result<(), String> {
     let fps_val = fps.unwrap_or(30.0);
-    export_project_edl(&input_path, &cuts, total_duration, &output_path, fps_val)
+    tauri::async_runtime::spawn_blocking(move || {
+        export_project_edl(&input_path, &cuts, total_duration, &output_path, fps_val)
+    })
+    .await
+    .map_err(|e| format!("Task error: {}", e))?
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
