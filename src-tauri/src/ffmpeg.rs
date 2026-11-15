@@ -159,13 +159,18 @@ pub fn extract_waveform(path: &str, points: usize) -> Result<Vec<u8>, String> {
 }
 
 /// Cuts video without re-encoding quality degradation using filter_complex concat
+/// Applies audio micro-crossfades (25ms) and speech edge padding (0.12s out / 0.10s in)
+/// to eliminate abrupt jump clicks and clipped consonants.
 pub fn export_trimmed_video(
     input_path: &str,
     cut_intervals: &[(f64, f64)],
     output_path: &str,
     total_duration: f64,
 ) -> Result<(), String> {
-    // 1. Calculate keep intervals from cut intervals
+    // 1. Calculate keep intervals with smooth edge padding
+    const PAD_OUT: f64 = 0.12; // preserve voice decay tail
+    const PAD_IN: f64 = 0.10;  // preserve breath/consonant onset
+
     let mut keep_intervals = Vec::new();
     let mut current_pos = 0.0;
 
@@ -173,10 +178,17 @@ pub fn export_trimmed_video(
     sorted_cuts.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
 
     for &(cut_start, cut_end) in &sorted_cuts {
-        if cut_start > current_pos + 0.05 {
-            keep_intervals.push((current_pos, cut_start));
+        // Effective cut bounds with safety padding
+        let eff_start = (cut_start + PAD_OUT).min(cut_end);
+        let eff_end = (cut_end - PAD_IN).max(eff_start);
+
+        // Only cut if there is meaningful silence left (> 0.08s)
+        if eff_end - eff_start > 0.08 {
+            if eff_start > current_pos + 0.05 {
+                keep_intervals.push((current_pos, eff_start));
+            }
+            current_pos = current_pos.max(eff_end);
         }
-        current_pos = current_pos.max(cut_end);
     }
 
     if current_pos < total_duration - 0.05 {
@@ -187,18 +199,21 @@ pub fn export_trimmed_video(
         return Err("Все фрагменты видео вырезаны".into());
     }
 
-    // 2. Build filter_complex string
+    // 2. Build filter_complex string with 25ms audio micro-fades
     let mut filter_complex = String::new();
     let mut concat_inputs = String::new();
 
     for (i, &(start, end)) in keep_intervals.iter().enumerate() {
+        let dur = end - start;
+        let fade_len = (dur * 0.15).min(0.025); // 25ms fade (or shorter if clip is very short)
+
         filter_complex.push_str(&format!(
             "[0:v]trim=start={:.3}:end={:.3},setpts=PTS-STARTPTS[v{}];",
             start, end, i
         ));
         filter_complex.push_str(&format!(
-            "[0:a]atrim=start={:.3}:end={:.3},asetpts=PTS-STARTPTS[a{}];",
-            start, end, i
+            "[0:a]atrim=start={:.3}:end={:.3},asetpts=PTS-STARTPTS,afade=t=in:st=0:d={:.3},afade=t=out:st={:.3}:d={:.3}[a{}];",
+            start, end, fade_len, (dur - fade_len).max(0.0), fade_len, i
         ));
         concat_inputs.push_str(&format!("[v{}][a{}]", i, i));
     }

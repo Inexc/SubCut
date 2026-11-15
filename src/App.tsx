@@ -272,20 +272,29 @@ export default function App() {
     }
   }
 
+  // Padding constants to keep natural speech decay and onset (no cut-off consonants or sudden jump-cuts)
+  const PAD_OUT = 0.12 // 120ms natural voice decay tail
+  const PAD_IN = 0.10  // 100ms consonant/breath onset
+
   // Real-time Auto-Skip Cut Silences during playback
   const handleTimeUpdate = () => {
     if (!videoRef.current) return
     const t = videoRef.current.currentTime
     setCurrentTime(t)
 
-    // Check if current time falls inside a cut silence
+    // Check if current time falls inside a cut silence (respecting smooth edge padding)
     const currentCut = items.find(
-      (item): item is { type: 'silence'; data: SilenceGap } =>
-        item.type === 'silence' && item.data.isCut && t >= item.data.startTime && t < item.data.endTime
+      (item): item is { type: 'silence'; data: SilenceGap } => {
+        if (item.type !== 'silence' || !item.data.isCut) return false
+        const effStart = item.data.startTime + PAD_OUT
+        const effEnd = item.data.endTime - PAD_IN
+        return effEnd > effStart + 0.08 && t >= effStart && t < effEnd
+      }
     )
 
     if (currentCut) {
-      videoRef.current.currentTime = currentCut.data.endTime
+      const targetTime = Math.max(0, currentCut.data.endTime - PAD_IN)
+      videoRef.current.currentTime = targetTime
     }
   }
 
