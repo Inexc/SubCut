@@ -92,14 +92,21 @@ fn get_video_duration_cmd(path: String) -> Result<f64, String> {
 }
 
 #[tauri::command]
+fn transcribe_speech_cmd(path: String) -> Result<Vec<ffmpeg::Phrase>, String> {
+    ffmpeg::transcribe_speech(&path)
+}
+
+#[tauri::command]
 fn select_video_file_cmd() -> Option<String> {
     let script = r#"
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$OutputEncoding = [System.Text.Encoding]::UTF8
 Add-Type -AssemblyName System.Windows.Forms
 $f = New-Object System.Windows.Forms.OpenFileDialog
 $f.Title = "Выберите видео для монтажа в SubCut"
 $f.Filter = "Видео файлы (*.mp4;*.mov;*.mkv;*.webm)|*.mp4;*.mov;*.mkv;*.webm|Все файлы (*.*)|*.*"
 if ($f.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
-    Write-Output $f.FileName
+    [Console]::Out.WriteLine($f.FileName)
 }
 "#;
     let output = Command::new("powershell")
@@ -119,13 +126,15 @@ if ($f.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
 fn select_output_file_cmd(default_name: String) -> Option<String> {
     let script = format!(
         r#"
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$OutputEncoding = [System.Text.Encoding]::UTF8
 Add-Type -AssemblyName System.Windows.Forms
 $f = New-Object System.Windows.Forms.SaveFileDialog
 $f.Title = "Сохранить готовое видео SubCut"
 $f.FileName = "{}"
 $f.Filter = "MP4 Видео (*.mp4)|*.mp4"
 if ($f.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{
-    Write-Output $f.FileName
+    [Console]::Out.WriteLine($f.FileName)
 }}
 "#,
         default_name
@@ -161,6 +170,7 @@ pub fn run() {
             detect_silence_cmd,
             extract_waveform_cmd,
             get_video_duration_cmd,
+            transcribe_speech_cmd,
             select_video_file_cmd,
             select_output_file_cmd,
             export_trimmed_video_cmd

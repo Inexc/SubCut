@@ -183,44 +183,65 @@ export default function App() {
         setWaveform(peaks)
       }
 
-      // 4. Construct script items between silences
-      const newItems: ScriptItem[] = []
-      let cur = 0
-      detectedGaps.forEach((gap, idx) => {
-        if (gap.startTime > cur + 0.1) {
-          newItems.push({
-            type: 'phrase',
-            data: {
-              id: `p-${idx + 1}`,
-              speaker: 'Спикер',
-              startTime: cur,
-              endTime: gap.startTime,
-              text: `Фрагмент ${idx + 1} речи спикера. Кликните для редактирования субтитров.`,
+      // 4. Transcribe speech using Whisper AI
+      let phrases: Phrase[] = []
+      try {
+        phrases = await invoke<Phrase[]>('transcribe_speech_cmd', { path: selected })
+      } catch (wErr) {
+        console.warn('Whisper transcription error:', wErr)
+      }
+
+      // 5. Interleave phrases and silences chronologically
+      const allEvents: { time: number; item: ScriptItem }[] = []
+
+      detectedGaps.forEach((gap) => {
+        allEvents.push({ time: gap.startTime, item: { type: 'silence', data: gap } })
+      })
+
+      if (phrases && phrases.length > 0) {
+        phrases.forEach((phrase) => {
+          allEvents.push({ time: phrase.startTime, item: { type: 'phrase', data: phrase } })
+        })
+      } else {
+        let cur = 0
+        detectedGaps.forEach((gap, idx) => {
+          if (gap.startTime > cur + 0.1) {
+            allEvents.push({
+              time: cur,
+              item: {
+                type: 'phrase',
+                data: {
+                  id: `p-${idx + 1}`,
+                  speaker: 'Спикер',
+                  startTime: cur,
+                  endTime: gap.startTime,
+                  text: `Речь спикера (фрагмент ${idx + 1})`,
+                },
+              },
+            })
+          }
+          cur = gap.endTime
+        })
+        if (cur < dur - 0.1) {
+          allEvents.push({
+            time: cur,
+            item: {
+              type: 'phrase',
+              data: {
+                id: `p-${detectedGaps.length + 1}`,
+                speaker: 'Спикер',
+                startTime: cur,
+                endTime: dur,
+                text: `Речь спикера (фрагмент ${detectedGaps.length + 1})`,
+              },
             },
           })
         }
-        newItems.push({
-          type: 'silence',
-          data: gap,
-        })
-        cur = gap.endTime
-      })
-
-      if (cur < dur - 0.1) {
-        newItems.push({
-          type: 'phrase',
-          data: {
-            id: `p-${detectedGaps.length + 1}`,
-            speaker: 'Спикер',
-            startTime: cur,
-            endTime: dur,
-            text: `Фрагмент ${detectedGaps.length + 1} речи спикера.`,
-          },
-        })
       }
 
-      if (newItems.length > 0) {
-        setItems(newItems)
+      allEvents.sort((a, b) => a.time - b.time)
+      if (allEvents.length > 0) {
+        setItems(allEvents.map((e) => e.item))
       }
       seekTo(0)
     } catch (err) {

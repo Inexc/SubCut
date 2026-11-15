@@ -13,6 +13,17 @@ pub struct SilenceGap {
     pub is_cut: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Phrase {
+    pub id: String,
+    pub speaker: String,
+    #[serde(rename = "startTime")]
+    pub start_time: f64,
+    #[serde(rename = "endTime")]
+    pub end_time: f64,
+    pub text: String,
+}
+
 #[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VideoInfo {
@@ -232,4 +243,17 @@ pub fn export_trimmed_video(
     }
 
     Ok(())
+}
+
+/// Transcribes speech using faster-whisper INT8 helper
+pub fn transcribe_speech(path: &str) -> Result<Vec<Phrase>, String> {
+    let script_path = concat!(env!("CARGO_MANIFEST_DIR"), "\\transcribe.py");
+    let output = Command::new("python")
+        .args(&[script_path, path])
+        .output()
+        .map_err(|e| format!("Не удалось вызвать Whisper: {}", e))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let phrases: Vec<Phrase> = serde_json::from_str(stdout.trim()).unwrap_or_default();
+    Ok(phrases)
 }
