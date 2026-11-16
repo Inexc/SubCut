@@ -27,6 +27,7 @@ import {
   Palette,
   Smartphone,
   Monitor,
+  ChevronDown,
 } from 'lucide-react'
 
 export type ColorPreset = 'none' | 'anime_punch' | 'cinematic' | 'crisp'
@@ -191,6 +192,9 @@ export default function App() {
   const [speechLanguage, setSpeechLanguage] = useState<string>('ru')
   const [burnSubtitles, setBurnSubtitles] = useState<boolean>(true)
   const [subtitlePreset, setSubtitlePreset] = useState<'hormozi' | 'classic' | 'box'>('hormozi')
+  const [subtitleSize, setSubtitleSize] = useState<number>(54)
+  const [subtitlePosition, setSubtitlePosition] = useState<'bottom' | 'center' | 'top'>('bottom')
+  const [isSubtitleMenuOpen, setIsSubtitleMenuOpen] = useState<boolean>(false)
   const [hardwareAccel, setHardwareAccel] = useState<'auto' | 'nvenc' | 'cpu'>('auto')
   const [isSettingsOpen, setIsSettingsOpen] = useState<boolean>(false)
   const [isExportMenuOpen, setIsExportMenuOpen] = useState<boolean>(false)
@@ -914,6 +918,8 @@ export default function App() {
         bgMusicVolume,
         autoDucking,
         duckingPreset,
+        subtitleSize,
+        subtitlePosition,
       })
       alert(`Видео сохранено:\n${outputPath}`)
     } catch (err) {
@@ -968,6 +974,8 @@ export default function App() {
         bgMusicVolume,
         autoDucking,
         duckingPreset,
+        subtitleSize,
+        subtitlePosition,
       })
       alert(`Видео для Reels/Shorts успешно сохранено:\n${outputPath}`)
     } catch (err) {
@@ -1027,6 +1035,8 @@ export default function App() {
         bgMusicVolume,
         autoDucking,
         duckingPreset,
+        subtitleSize,
+        subtitlePosition,
       })
       alert(`Компактное видео для Telegram сохранено:\n${outputPath}`)
     } catch (err) {
@@ -1208,6 +1218,24 @@ export default function App() {
   // Keyboard shortcuts
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.code === 'Escape') {
+        if (isSubtitleMenuOpen) {
+          setIsSubtitleMenuOpen(false)
+          return
+        }
+        if (isExportMenuOpen) {
+          setIsExportMenuOpen(false)
+          return
+        }
+        if (isSettingsOpen) {
+          setIsSettingsOpen(false)
+          return
+        }
+        if (isCoverModalOpen) {
+          setIsCoverModalOpen(false)
+          return
+        }
+      }
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) {
         return
       }
@@ -1224,7 +1252,7 @@ export default function App() {
     }
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [isPlaying, currentTime, totalDuration])
+  }, [isPlaying, currentTime, totalDuration, isSubtitleMenuOpen, isExportMenuOpen, isSettingsOpen, isCoverModalOpen])
 
   const fileName = filePath ? filePath.split(/[\\/]/).pop() : 'Выберите видео'
 
@@ -1275,24 +1303,165 @@ export default function App() {
         {/* Right: Actions & Subtitle Preset / Settings */}
         <div className="flex items-center gap-2">
           
-          {/* Subtitles Quick Toggle */}
-          <button
-            onClick={() => setBurnSubtitles(!burnSubtitles)}
-            className={`h-7 px-2.5 rounded text-xs font-medium border flex items-center gap-1.5 transition ${
-              burnSubtitles
-                ? 'bg-zinc-800 text-zinc-200 border-zinc-600'
-                : 'bg-zinc-900/60 text-zinc-500 border-zinc-800 hover:text-zinc-300'
-            }`}
-            title="Субтитры"
-          >
-            <Type className="w-3.5 h-3.5" />
-            <span className="hidden lg:inline">Субтитры</span>
-            {burnSubtitles && (
-              <span className="text-[10px] font-mono px-1 py-0.2 rounded bg-zinc-700 text-amber-300 uppercase">
-                {subtitlePreset}
-              </span>
+          {/* Subtitles Quick Toggle & Dropdown */}
+          <div className="relative">
+            <div
+              className={`h-7 rounded border flex items-center transition ${
+                burnSubtitles
+                  ? 'bg-zinc-800 text-zinc-200 border-zinc-600'
+                  : 'bg-zinc-900/60 text-zinc-500 border-zinc-800 hover:text-zinc-300'
+              }`}
+            >
+              <button
+                onClick={() => {
+                  const nextVal = !burnSubtitles
+                  setBurnSubtitles(nextVal)
+                  if (!nextVal) setIsSubtitleMenuOpen(false)
+                }}
+                className="h-full px-2.5 flex items-center gap-1.5 text-xs font-medium hover:text-white transition"
+                title={burnSubtitles ? 'Отключить вшивание субтитров' : 'Включить вшивание субтитров'}
+              >
+                <Type className="w-3.5 h-3.5" />
+                <span className="hidden lg:inline">Субтитры</span>
+              </button>
+              {burnSubtitles && (
+                <button
+                  onClick={() => {
+                    setIsSubtitleMenuOpen(!isSubtitleMenuOpen)
+                    setIsExportMenuOpen(false)
+                  }}
+                  className="h-full px-1.5 border-l border-zinc-700/80 hover:bg-zinc-700/50 flex items-center gap-1 text-[10px] font-mono transition text-amber-300"
+                  title="Настроить субтитры: размер, стиль, положение"
+                >
+                  <span className="uppercase">
+                    {subtitlePreset === 'hormozi' ? 'Караоке' : subtitlePreset === 'box' ? 'Плашка' : 'Классик'} · {subtitleSize}px
+                  </span>
+                  <ChevronDown className="w-3 h-3 text-zinc-400" />
+                </button>
+              )}
+            </div>
+
+            {/* Subtitle Quick Popover Backdrop */}
+            {isSubtitleMenuOpen && burnSubtitles && (
+              <div
+                className="fixed inset-0 z-30 bg-transparent"
+                onClick={() => setIsSubtitleMenuOpen(false)}
+              />
             )}
-          </button>
+
+            {/* Subtitle Quick Popover */}
+            {isSubtitleMenuOpen && burnSubtitles && (
+              <div
+                className="absolute right-0 top-8 w-72 bg-zinc-900 border border-zinc-800 rounded-lg shadow-2xl p-3 z-40 text-xs animate-in fade-in duration-100 space-y-3"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <div className="flex items-center justify-between pb-2 border-b border-zinc-800">
+                  <span className="font-semibold text-zinc-200 flex items-center gap-1.5">
+                    <Type className="w-3.5 h-3.5 text-amber-400" />
+                    Настройка субтитров
+                  </span>
+                  <button
+                    onClick={() => setIsSubtitleMenuOpen(false)}
+                    className="w-5 h-5 rounded hover:bg-zinc-800 text-zinc-400 hover:text-white flex items-center justify-center transition"
+                  >
+                    <X className="w-3 h-3" />
+                  </button>
+                </div>
+
+                {/* Style */}
+                <div className="space-y-1">
+                  <label className="text-[11px] font-medium text-zinc-400">Стиль отображения</label>
+                  <div className="grid grid-cols-3 gap-1">
+                    {[
+                      { id: 'hormozi' as const, title: 'Караоке' },
+                      { id: 'classic' as const, title: 'Классик' },
+                      { id: 'box' as const, title: 'Плашка' },
+                    ].map((st) => (
+                      <button
+                        key={st.id}
+                        onClick={() => setSubtitlePreset(st.id)}
+                        className={`py-1 px-1.5 rounded border text-center transition font-medium text-[11px] ${
+                          subtitlePreset === st.id
+                            ? 'bg-zinc-100 text-zinc-950 border-white'
+                            : 'bg-zinc-950/60 text-zinc-400 border-zinc-800 hover:text-zinc-200'
+                        }`}
+                      >
+                        {st.title}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Font Size */}
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <label className="text-[11px] font-medium text-zinc-400">Размер шрифта</label>
+                    <span className="font-mono text-[11px] text-amber-300 font-semibold">{subtitleSize} px</span>
+                  </div>
+                  {/* Preset Pills */}
+                  <div className="grid grid-cols-4 gap-1">
+                    {[
+                      { size: 42, label: '42', title: 'Компактный (42px)' },
+                      { size: 54, label: '54', title: 'Стандарт (54px)' },
+                      { size: 66, label: '66', title: 'Крупный (66px)' },
+                      { size: 78, label: '78', title: 'Огромный (78px)' },
+                    ].map((sz) => (
+                      <button
+                        key={sz.size}
+                        onClick={() => setSubtitleSize(sz.size)}
+                        title={sz.title}
+                        className={`py-1 px-1 rounded border text-center font-mono text-[11px] transition ${
+                          subtitleSize === sz.size
+                            ? 'bg-amber-400 text-zinc-950 border-amber-300 font-bold'
+                            : 'bg-zinc-950/60 text-zinc-400 border-zinc-800 hover:text-zinc-200'
+                        }`}
+                      >
+                        {sz.label}
+                      </button>
+                    ))}
+                  </div>
+                  {/* Slider */}
+                  <div className="flex items-center gap-2 pt-0.5">
+                    <span className="text-[10px] text-zinc-500 font-mono">36</span>
+                    <input
+                      type="range"
+                      min={36}
+                      max={90}
+                      step={2}
+                      value={subtitleSize}
+                      onChange={(e) => setSubtitleSize(Number(e.target.value))}
+                      className="flex-1 h-1.5 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-amber-400"
+                    />
+                    <span className="text-[10px] text-zinc-500 font-mono">90</span>
+                  </div>
+                </div>
+
+                {/* Vertical Position */}
+                <div className="space-y-1">
+                  <label className="text-[11px] font-medium text-zinc-400">Положение на экране</label>
+                  <div className="grid grid-cols-3 gap-1">
+                    {[
+                      { id: 'bottom' as const, label: 'Снизу' },
+                      { id: 'center' as const, label: 'По центру' },
+                      { id: 'top' as const, label: 'Сверху' },
+                    ].map((pos) => (
+                      <button
+                        key={pos.id}
+                        onClick={() => setSubtitlePosition(pos.id)}
+                        className={`py-1 px-1.5 rounded border text-center transition font-medium text-[11px] ${
+                          subtitlePosition === pos.id
+                            ? 'bg-zinc-100 text-zinc-950 border-white'
+                            : 'bg-zinc-950/60 text-zinc-400 border-zinc-800 hover:text-zinc-200'
+                        }`}
+                      >
+                        {pos.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
 
           {/* Background Music Quick Button */}
           <button
@@ -1321,7 +1490,11 @@ export default function App() {
 
           {/* Settings Modal Button */}
           <button
-            onClick={() => setIsSettingsOpen(!isSettingsOpen)}
+            onClick={() => {
+              setIsSettingsOpen(!isSettingsOpen)
+              setIsSubtitleMenuOpen(false)
+              setIsExportMenuOpen(false)
+            }}
             className={`h-7 px-2.5 rounded text-xs font-medium border flex items-center gap-1.5 transition ${
               isSettingsOpen
                 ? 'bg-zinc-700 text-white border-zinc-500'
@@ -1389,8 +1562,18 @@ export default function App() {
 
           {/* Export Dropdown */}
           <div className="relative">
+            {/* Export Menu Backdrop */}
+            {isExportMenuOpen && (
+              <div
+                className="fixed inset-0 z-30 bg-transparent"
+                onClick={() => setIsExportMenuOpen(false)}
+              />
+            )}
             <button
-              onClick={() => setIsExportMenuOpen(!isExportMenuOpen)}
+              onClick={() => {
+                setIsExportMenuOpen(!isExportMenuOpen)
+                setIsSubtitleMenuOpen(false)
+              }}
               disabled={isExporting || isAnalyzing}
               className="h-7 px-3 rounded text-xs font-semibold bg-zinc-100 hover:bg-white text-zinc-950 flex items-center gap-1.5 transition shadow-sm disabled:opacity-50"
             >
@@ -1476,7 +1659,13 @@ export default function App() {
       </header>
 
       {/* 2. MAIN SPLIT: Video Left / Clean Script Right */}
-      <div className="flex-1 flex overflow-hidden relative" onClick={() => isExportMenuOpen && setIsExportMenuOpen(false)}>
+      <div
+        className="flex-1 flex overflow-hidden relative"
+        onClick={() => {
+          if (isExportMenuOpen) setIsExportMenuOpen(false)
+          if (isSubtitleMenuOpen) setIsSubtitleMenuOpen(false)
+        }}
+      >
         
         {/* LEFT PANE: Video Player */}
         <section className="w-[50%] lg:w-[48%] border-r border-zinc-800/80 bg-zinc-950 flex flex-col justify-between p-4">
@@ -1645,45 +1834,84 @@ export default function App() {
               )}
 
               {/* Subtitle Overlay */}
-              {burnSubtitles && activePhrase && (
-                <div className="absolute inset-x-0 bottom-8 px-4 text-center pointer-events-none z-10 transition-all">
-                  {subtitlePreset === 'hormozi' ? (
-                    <div className="inline-block px-3 py-1.5 rounded bg-black/85 border border-black/60 shadow-2xl drop-shadow-[0_4px_10px_rgba(0,0,0,0.95)] max-w-[90%]">
-                      {activePhrase.data.words && activePhrase.data.words.length > 0 ? (
-                        activePhrase.data.words.map((w, wIdx) => {
-                          const nextWord = activePhrase.data.words![wIdx + 1]
-                          const wordEnd = nextWord ? Math.min(w.endTime + 0.15, nextWord.startTime) : w.endTime + 0.2
-                          const isWordActive = currentTime >= w.startTime && currentTime <= wordEnd
-                          return (
-                            <span
-                              key={wIdx}
-                              className={`inline-block px-1 font-black text-sm md:text-base tracking-wide uppercase transition-all duration-75 ${
-                                isWordActive
-                                  ? 'text-amber-300 scale-110 drop-shadow-[0_0_8px_rgba(252,211,77,0.8)]'
-                                  : 'text-white'
-                              }`}
-                            >
-                              {w.word}
-                            </span>
-                          )
-                        })
-                      ) : (
-                        <span className="text-white font-black text-sm md:text-base tracking-wide uppercase">
-                          {activePhrase.data.text}
-                        </span>
-                      )}
-                    </div>
-                  ) : subtitlePreset === 'box' ? (
-                    <span className="inline-block px-3.5 py-1.5 rounded-md bg-black/85 backdrop-blur-sm text-zinc-100 font-semibold text-xs md:text-sm border border-zinc-750/80 shadow-lg">
-                      {activePhrase.data.text}
-                    </span>
-                  ) : (
-                    <span className="inline-block px-3 py-1.5 text-white font-bold text-sm md:text-base leading-tight drop-shadow-[0_2px_4px_rgba(0,0,0,0.95)]">
-                      {activePhrase.data.text}
-                    </span>
-                  )}
-                </div>
-              )}
+              {burnSubtitles && (activePhrase || (filePath && (isSubtitleMenuOpen || isSettingsOpen))) && (() => {
+                const phraseData = activePhrase?.data || (phraseList.length > 0 ? phraseList[0].data : {
+                  id: 'preview',
+                  speaker: 'S',
+                  startTime: 0,
+                  endTime: 2,
+                  text: 'Пример оформления субтитров',
+                  words: [
+                    { word: 'Пример', startTime: 0, endTime: 0.6 },
+                    { word: 'оформления', startTime: 0.7, endTime: 1.3 },
+                    { word: 'субтитров', startTime: 1.4, endTime: 2.0 },
+                  ],
+                })
+                const isPreview = !activePhrase
+
+                return (
+                  <div
+                    className={`absolute inset-x-0 ${
+                      subtitlePosition === 'top'
+                        ? 'top-11'
+                        : subtitlePosition === 'center'
+                        ? 'top-1/2 -translate-y-1/2'
+                        : 'bottom-8'
+                    } px-4 text-center pointer-events-none z-10 transition-all duration-150`}
+                  >
+                    {subtitlePreset === 'hormozi' ? (
+                      <div
+                        className="inline-block px-3 py-1.5 rounded bg-black/85 border border-black/60 shadow-2xl drop-shadow-[0_4px_10px_rgba(0,0,0,0.95)] max-w-[92%]"
+                        style={{ fontSize: `${Math.max(12, Math.round(subtitleSize * 0.32))}px`, lineHeight: 1.25 }}
+                      >
+                        {phraseData.words && phraseData.words.length > 0 ? (
+                          phraseData.words.map((w, wIdx) => {
+                            const nextWord = phraseData.words![wIdx + 1]
+                            const wordEnd = nextWord ? Math.min(w.endTime + 0.15, nextWord.startTime) : w.endTime + 0.2
+                            const isWordActive = !isPreview
+                              ? (currentTime >= w.startTime && currentTime <= wordEnd)
+                              : (wIdx === 0)
+                            return (
+                              <span
+                                key={wIdx}
+                                className={`inline-block px-1 font-black tracking-wide uppercase transition-all duration-75 ${
+                                  isWordActive
+                                    ? 'text-amber-300 scale-110 drop-shadow-[0_0_8px_rgba(252,211,77,0.8)]'
+                                    : 'text-white'
+                                }`}
+                              >
+                                {w.word}
+                              </span>
+                            )
+                          })
+                        ) : (
+                          <span className="text-white font-black tracking-wide uppercase">
+                            {phraseData.text}
+                          </span>
+                        )}
+                      </div>
+                    ) : subtitlePreset === 'box' ? (
+                      <span
+                        className="inline-block px-3.5 py-1.5 rounded-md bg-black/85 backdrop-blur-sm text-zinc-100 font-semibold border border-zinc-700/80 shadow-lg max-w-[92%]"
+                        style={{ fontSize: `${Math.max(11, Math.round(subtitleSize * 0.28))}px`, lineHeight: 1.25 }}
+                      >
+                        {phraseData.text}
+                      </span>
+                    ) : (
+                      <span
+                        className="inline-block px-3 py-1.5 text-white font-bold leading-tight drop-shadow-[0_2px_4px_rgba(0,0,0,0.95)] max-w-[92%]"
+                        style={{
+                          fontSize: `${Math.max(12, Math.round(subtitleSize * 0.32))}px`,
+                          lineHeight: 1.25,
+                          textShadow: '0 2px 4px rgba(0,0,0,0.95), 0 0 2px rgba(0,0,0,0.9)',
+                        }}
+                      >
+                        {phraseData.text}
+                      </span>
+                    )}
+                  </div>
+                )
+              })()}
 
               {/* Timecode badge */}
               <div className="absolute top-2.5 right-2.5 pointer-events-none z-10">
@@ -1935,36 +2163,116 @@ export default function App() {
 
                 <div className="h-px bg-zinc-800 my-2" />
 
-                {/* 3. Subtitle Style Preset */}
-                <div className="space-y-1.5">
+                {/* 3. Subtitle Customization */}
+                <div className="space-y-3 bg-zinc-950/40 p-3 rounded-lg border border-zinc-800/80">
                   <div className="flex items-center justify-between">
                     <label className="font-medium text-zinc-200 flex items-center gap-1.5">
                       <Type className="w-3.5 h-3.5 text-amber-400" />
-                      <span>Стиль субтитров</span>
+                      <span>Субтитры</span>
                     </label>
-                    <span className="font-mono text-zinc-400 uppercase">{subtitlePreset}</span>
+                    <span className="font-mono text-[11px] text-amber-300 uppercase">
+                      {subtitlePreset} · {subtitleSize}px · {subtitlePosition === 'bottom' ? 'снизу' : subtitlePosition === 'center' ? 'центр' : 'сверху'}
+                    </span>
                   </div>
-                  <div className="grid grid-cols-3 gap-2">
-                    {[
-                      { id: 'hormozi' as const, title: 'Караоке', desc: 'Подсветка активного слова' },
-                      { id: 'classic' as const, title: 'Классический', desc: 'Белый текст с контуром' },
-                      { id: 'box' as const, title: 'Плашка', desc: 'Полупрозрачный фон' },
-                    ].map((st) => (
-                      <button
-                        key={st.id}
-                        onClick={() => setSubtitlePreset(st.id)}
-                        className={`p-2 rounded border text-left transition ${
-                          subtitlePreset === st.id
-                            ? 'bg-zinc-100 text-zinc-950 border-white'
-                            : 'bg-zinc-950/60 text-zinc-400 border-zinc-800 hover:text-zinc-200'
-                        }`}
-                      >
-                        <div className="font-semibold text-[11px]">{st.title}</div>
-                        <div className={`text-[10px] ${subtitlePreset === st.id ? 'text-zinc-700' : 'text-zinc-500'}`}>
-                          {st.desc}
-                        </div>
-                      </button>
-                    ))}
+
+                  {/* 3.1 Style Preset */}
+                  <div className="space-y-1">
+                    <span className="text-[11px] text-zinc-400">Стиль оформления</span>
+                    <div className="grid grid-cols-3 gap-2">
+                      {[
+                        { id: 'hormozi' as const, title: 'Караоке', desc: 'Подсветка активного слова' },
+                        { id: 'classic' as const, title: 'Классический', desc: 'Белый текст с контуром' },
+                        { id: 'box' as const, title: 'Плашка', desc: 'Полупрозрачный фон' },
+                      ].map((st) => (
+                        <button
+                          key={st.id}
+                          onClick={() => setSubtitlePreset(st.id)}
+                          className={`p-2 rounded border text-left transition ${
+                            subtitlePreset === st.id
+                              ? 'bg-zinc-100 text-zinc-950 border-white'
+                              : 'bg-zinc-900/60 text-zinc-400 border-zinc-800 hover:text-zinc-200'
+                          }`}
+                        >
+                          <div className="font-semibold text-[11px]">{st.title}</div>
+                          <div className={`text-[10px] ${subtitlePreset === st.id ? 'text-zinc-700' : 'text-zinc-500'}`}>
+                            {st.desc}
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* 3.2 Font Size */}
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[11px] text-zinc-400">Размер шрифта</span>
+                      <span className="font-mono text-zinc-300 font-semibold">{subtitleSize} px</span>
+                    </div>
+                    {/* Preset Buttons */}
+                    <div className="grid grid-cols-4 gap-1.5">
+                      {[
+                        { size: 42, title: 'Компактный', desc: '42 px' },
+                        { size: 54, title: 'Стандарт', desc: '54 px' },
+                        { size: 66, title: 'Крупный', desc: '66 px' },
+                        { size: 78, title: 'Огромный', desc: '78 px' },
+                      ].map((sz) => (
+                        <button
+                          key={sz.size}
+                          onClick={() => setSubtitleSize(sz.size)}
+                          className={`p-1.5 rounded border text-center transition ${
+                            subtitleSize === sz.size
+                              ? 'bg-amber-400 text-zinc-950 border-amber-300'
+                              : 'bg-zinc-900/60 text-zinc-400 border-zinc-800 hover:text-zinc-200'
+                          }`}
+                        >
+                          <div className="font-semibold text-[11px]">{sz.title}</div>
+                          <div className={`text-[10px] font-mono ${subtitleSize === sz.size ? 'text-zinc-900 font-medium' : 'text-zinc-500'}`}>
+                            {sz.desc}
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                    {/* Slider */}
+                    <div className="flex items-center gap-2 pt-1">
+                      <span className="text-[10px] text-zinc-500 font-mono">36</span>
+                      <input
+                        type="range"
+                        min={36}
+                        max={90}
+                        step={2}
+                        value={subtitleSize}
+                        onChange={(e) => setSubtitleSize(Number(e.target.value))}
+                        className="flex-1 h-1.5 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-amber-400"
+                      />
+                      <span className="text-[10px] text-zinc-500 font-mono">90</span>
+                    </div>
+                  </div>
+
+                  {/* 3.3 Position */}
+                  <div className="space-y-1">
+                    <span className="text-[11px] text-zinc-400">Расположение по вертикали</span>
+                    <div className="grid grid-cols-3 gap-2">
+                      {[
+                        { id: 'bottom' as const, title: 'Снизу', desc: 'Для Shorts и Reels' },
+                        { id: 'center' as const, title: 'По центру', desc: 'В центре кадра' },
+                        { id: 'top' as const, title: 'Сверху', desc: 'В верхней трети' },
+                      ].map((pos) => (
+                        <button
+                          key={pos.id}
+                          onClick={() => setSubtitlePosition(pos.id)}
+                          className={`p-2 rounded border text-left transition ${
+                            subtitlePosition === pos.id
+                              ? 'bg-zinc-100 text-zinc-950 border-white'
+                              : 'bg-zinc-900/60 text-zinc-400 border-zinc-800 hover:text-zinc-200'
+                          }`}
+                        >
+                          <div className="font-semibold text-[11px]">{pos.title}</div>
+                          <div className={`text-[10px] ${subtitlePosition === pos.id ? 'text-zinc-700' : 'text-zinc-500'}`}>
+                            {pos.desc}
+                          </div>
+                        </button>
+                      ))}
+                    </div>
                   </div>
                 </div>
 

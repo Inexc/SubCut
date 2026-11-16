@@ -246,11 +246,14 @@ async fn export_trimmed_video_cmd(
     bg_music_volume: Option<f64>,
     auto_ducking: Option<bool>,
     ducking_preset: Option<String>,
+    subtitle_size: Option<u32>,
+    subtitle_position: Option<String>,
 ) -> Result<(), String> {
     let framing = framing_mode.unwrap_or_else(|| "original".to_string());
     let color = color_preset.unwrap_or_else(|| "none".to_string());
     let bg_vol = bg_music_volume.unwrap_or(0.15);
     let ducking = auto_ducking.unwrap_or(true);
+    let sub_pos = subtitle_position;
     tauri::async_runtime::spawn_blocking(move || {
         export_trimmed_video(
             &input_path,
@@ -268,6 +271,8 @@ async fn export_trimmed_video_cmd(
             bg_vol,
             ducking,
             ducking_preset.as_deref(),
+            subtitle_size,
+            sub_pos.as_deref(),
         )
     })
     .await

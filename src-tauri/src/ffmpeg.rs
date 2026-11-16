@@ -243,6 +243,8 @@ pub fn generate_ass_subtitles(
     keep_intervals: &[(f64, f64)],
     output_path: &str,
     preset: &str,
+    subtitle_size: Option<u32>,
+    subtitle_position: Option<&str>,
 ) -> Result<(), String> {
     let mut ass = String::new();
     ass.push_str("[Script Info]\n");
@@ -253,18 +255,76 @@ pub fn generate_ass_subtitles(
     ass.push_str("[V4+ Styles]\n");
     ass.push_str("Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n");
 
+    let font_size = subtitle_size
+        .unwrap_or(match preset {
+            "hormozi" => 58,
+            "box" => 48,
+            _ => 52,
+        })
+        .clamp(24, 120);
+
+    let pos = subtitle_position.unwrap_or("bottom");
+    let alignment = match pos.trim().to_ascii_lowercase().as_str() {
+        "top" => 8,
+        "center" | "middle" => 5,
+        _ => 2,
+    };
+
+    let margin_lr = ((font_size as f64) * 0.75).clamp(36.0, 72.0).round() as u32;
+
+    let (border_style, outline, shadow, margin_v) = match preset {
+        "hormozi" => {
+            let ol = ((font_size as f64) / 13.0).clamp(2.0, 7.5);
+            let sh = ((font_size as f64) / 54.0 * 1.0).clamp(0.5, 2.5);
+            let mv = match alignment {
+                5 => 0,
+                8 => ((font_size as f64) * 3.5).round().max(160.0) as u32,
+                _ => ((font_size as f64) * 4.1).round() as u32,
+            };
+            (1, ol, sh, mv)
+        }
+        "box" => {
+            let ol = ((font_size as f64) / 24.0).clamp(1.5, 4.0);
+            let mv = match alignment {
+                5 => 0,
+                8 => ((font_size as f64) * 3.5).round().max(160.0) as u32,
+                _ => ((font_size as f64) * 3.75).round() as u32,
+            };
+            (3, ol, 0.0, mv)
+        }
+        _ => {
+            let ol = ((font_size as f64) / 15.0).clamp(1.8, 6.0);
+            let sh = ((font_size as f64) / 52.0 * 1.5).clamp(0.8, 3.0);
+            let mv = match alignment {
+                5 => 0,
+                8 => ((font_size as f64) * 3.5).round().max(160.0) as u32,
+                _ => ((font_size as f64) * 3.85).round() as u32,
+            };
+            (1, ol, sh, mv)
+        }
+    };
+
     match preset {
         "hormozi" => {
-            // Hormozi Style: Bold, Yellow Karaoke Primary, White Secondary, 4.5px Black Outline
-            ass.push_str("Style: Default,Arial,58,&H0000FFFF,&H00FFFFFF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,4.5,1.0,2,40,40,240,1\n\n");
+            // Hormozi Style: Bold, Yellow Karaoke Primary, White Secondary, Black Outline
+            ass.push_str(&format!(
+                "Style: Default,Arial,{},&H0000FFFF,&H00FFFFFF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,{},{:.1},{:.1},{},{},{},{},1\n\n",
+                font_size, border_style, outline, shadow, alignment, margin_lr, margin_lr, margin_v
+            ));
         }
         "box" => {
             // Box Minimal: Semi-transparent dark background box
-            ass.push_str("Style: Default,Arial,48,&H00FFFFFF,&H000000FF,&H00000000,&H90000000,-1,0,0,0,100,100,0,0,3,2.0,0,2,40,40,180,1\n\n");
+            ass.push_str(&format!(
+                "Style: Default,Arial,{},&H00FFFFFF,&H000000FF,&H00000000,&H90000000,-1,0,0,0,100,100,0,0,{},{:.1},0,{},{},{},{},1\n\n",
+                font_size, border_style, outline, alignment, margin_lr, margin_lr, margin_v
+            ));
         }
         _ => {
-            // Classic Clean: White with clean 3.5px black outline
-            ass.push_str("Style: Default,Arial,52,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,3.5,1.5,2,40,40,200,1\n\n");
+            // Classic Clean: White with clean black outline
+            ass.push_str(&format!(
+                "Style: Default,Arial,{},&H00FFFFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,{},{:.1},{:.1},{},{},{},{},1\n\n",
+                font_size, border_style, outline, shadow, alignment, margin_lr, margin_lr, margin_v
+            ));
         }
     }
 
@@ -958,6 +1018,8 @@ pub fn export_trimmed_video(
     bg_music_volume: f64,
     auto_ducking: bool,
     ducking_preset: Option<&str>,
+    subtitle_size: Option<u32>,
+    subtitle_position: Option<&str>,
 ) -> Result<(), String> {
     let keep_intervals = calculate_keep_intervals(cut_intervals, total_duration);
 
@@ -990,7 +1052,14 @@ pub fn export_trimmed_video(
 
     if should_burn {
         let temp_ass_str = temp_ass_path.to_string_lossy().to_string();
-        generate_ass_subtitles(phrases, &keep_intervals, &temp_ass_str, subtitle_preset)?;
+        generate_ass_subtitles(
+            phrases,
+            &keep_intervals,
+            &temp_ass_str,
+            subtitle_preset,
+            subtitle_size,
+            subtitle_position,
+        )?;
     }
 
     // Build filter_complex string
@@ -1517,7 +1586,7 @@ mod tests {
         ];
 
         let keep = vec![(0.0, 10.0)];
-        generate_ass_subtitles(&phrases, &keep, &ass_str, "hormozi").unwrap();
+        generate_ass_subtitles(&phrases, &keep, &ass_str, "hormozi", None, None).unwrap();
 
         let content = std::fs::read_to_string(&ass_path).unwrap();
         let _ = std::fs::remove_file(&ass_path);
@@ -1525,6 +1594,74 @@ mod tests {
         assert!(content.contains(r"{\k"));
         assert!(content.contains("ПРИВЕТ"));
         assert!(content.contains("МИР"));
+    }
+
+    #[test]
+    fn test_generate_ass_subtitles_custom_size_and_position() {
+        let temp_dir = std::env::temp_dir();
+        let ass_path = temp_dir.join(format!("test_custom_ass_{}.ass", std::process::id()));
+        let ass_str = ass_path.to_string_lossy().to_string();
+
+        let phrases = vec![Phrase {
+            id: "p1".into(),
+            speaker: "S".into(),
+            start_time: 0.5,
+            end_time: 2.0,
+            text: "Тестовая фраза".into(),
+            words: vec![
+                Word { word: "Тестовая".into(), start_time: 0.5, end_time: 1.2 },
+                Word { word: "фраза".into(), start_time: 1.3, end_time: 2.0 },
+            ],
+        }];
+        let keep = vec![(0.0, 5.0)];
+
+        // Test 1: Size 78 (Large/Viral) and Top position
+        generate_ass_subtitles(&phrases, &keep, &ass_str, "hormozi", Some(78), Some("top")).unwrap();
+        let content_large = std::fs::read_to_string(&ass_path).unwrap();
+        assert!(content_large.contains(",Arial,78,"));
+        // Top alignment in ASS is 8
+        assert!(content_large.contains(",8,"));
+        // Outline for 78 in Hormozi is 78/13 = 6.0
+        assert!(content_large.contains(",6.0,"));
+
+        // Test 2: Size 42 (Compact) and Center position
+        generate_ass_subtitles(&phrases, &keep, &ass_str, "classic", Some(42), Some("center")).unwrap();
+        let content_center = std::fs::read_to_string(&ass_path).unwrap();
+        assert!(content_center.contains(",Arial,42,"));
+        // Center alignment in ASS is 5, margin_v is 0
+        assert!(content_center.contains(",5,"));
+        assert!(content_center.contains(",0,1\n"));
+        // Outline for 42 in Classic is 42/15 = 2.8
+        assert!(content_center.contains(",2.8,"));
+
+        // Test 3: Box preset with size 66 and Bottom position
+        generate_ass_subtitles(&phrases, &keep, &ass_str, "box", Some(66), Some("bottom")).unwrap();
+        let content_box = std::fs::read_to_string(&ass_path).unwrap();
+        assert!(content_box.contains(",Arial,66,"));
+        // BorderStyle 3 for box
+        assert!(content_box.contains(",3,"));
+        // Bottom alignment is 2
+        assert!(content_box.contains(",2,"));
+
+        // Test 4: Size clamping below min (10 -> 24) and uppercase "TOP" position
+        generate_ass_subtitles(&phrases, &keep, &ass_str, "hormozi", Some(10), Some("TOP")).unwrap();
+        let content_clamped_low = std::fs::read_to_string(&ass_path).unwrap();
+        assert!(content_clamped_low.contains(",Arial,24,"));
+        assert!(content_clamped_low.contains(",8,"));
+
+        // Test 5: Size clamping above max (500 -> 120) and mixed-case "Center"
+        generate_ass_subtitles(&phrases, &keep, &ass_str, "classic", Some(500), Some("Center")).unwrap();
+        let content_clamped_high = std::fs::read_to_string(&ass_path).unwrap();
+        assert!(content_clamped_high.contains(",Arial,120,"));
+        assert!(content_clamped_high.contains(",5,"));
+
+        // Test 6: Default fallback when None is passed
+        generate_ass_subtitles(&phrases, &keep, &ass_str, "hormozi", None, None).unwrap();
+        let content_defaults = std::fs::read_to_string(&ass_path).unwrap();
+        assert!(content_defaults.contains(",Arial,58,"));
+        assert!(content_defaults.contains(",2,"));
+
+        let _ = std::fs::remove_file(&ass_path);
     }
 
     #[test]
