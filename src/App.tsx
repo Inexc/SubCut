@@ -31,6 +31,7 @@ import {
 } from 'lucide-react'
 
 export type ColorPreset = 'none' | 'anime_punch' | 'cinematic' | 'crisp'
+export type TransitionSmoothing = 'smooth' | 'dynamic'
 
 export function getColorFilterStyle(preset: ColorPreset): string {
   switch (preset) {
@@ -478,6 +479,16 @@ export default function App() {
   const [autoDucking, setAutoDucking] = useState<boolean>(true)
   const [duckingPreset, setDuckingPreset] = useState<'soft' | 'medium' | 'hard'>('medium')
 
+  // Transition Smoothing State ('smooth' = 120ms/100ms / 40ms fades; 'dynamic' = 70ms / 20ms fades)
+  const [transitionSmoothing, setTransitionSmoothing] = useState<TransitionSmoothing>('smooth')
+
+  const smoothingPadding = useMemo(() => {
+    if (transitionSmoothing === 'dynamic') {
+      return { padOut: 0.07, padIn: 0.07, fadeMs: 20 }
+    }
+    return { padOut: 0.12, padIn: 0.10, fadeMs: 40 }
+  }, [transitionSmoothing])
+
   const videoRef = useRef<HTMLVideoElement>(null)
   const bgVideoRef = useRef<HTMLVideoElement>(null)
   const bgAudioRef = useRef<HTMLAudioElement>(null)
@@ -485,7 +496,10 @@ export default function App() {
   const coverBgRef = useRef<HTMLVideoElement>(null)
   const timelineRef = useRef<HTMLDivElement>(null)
   const isSkippingRef = useRef<boolean>(false)
-  const lastSkippedIdRef = useRef<string | null>(null)
+  const skippedCutIdRef = useRef<number | null>(null)
+  const fadeAnimationRef = useRef<number | null>(null)
+  const seekFallbackTimerRef = useRef<number | null>(null)
+  const rafIdRef = useRef<number | null>(null)
 
   // Derived stats
   const silences = items.filter((i): i is { type: 'silence'; data: SilenceGap } => i.type === 'silence')
@@ -493,12 +507,12 @@ export default function App() {
   const cutDuration = activeCuts.reduce((acc, s) => acc + s.data.duration, 0)
   const remainingDuration = Math.max(0, totalDuration - cutDuration)
 
-  // Kept intervals calculation matching backend calculate_keep_intervals
+  // Kept intervals calculation matching backend calculate_keep_intervals_with_smoothing
   const keepIntervals = useMemo(() => {
     if (!totalDuration || totalDuration <= 0.05) return []
 
-    const PAD_OUT = 0.12
-    const PAD_IN = 0.10
+    const PAD_OUT = smoothingPadding.padOut
+    const PAD_IN = smoothingPadding.padIn
 
     // 1. Sanitize and sort raw cuts
     const validCuts = items
@@ -544,7 +558,53 @@ export default function App() {
       keep.push([cur, totalDuration])
     }
     return keep
-  }, [items, totalDuration])
+  }, [items, totalDuration, smoothingPadding])
+
+  // Derived cut zones to skip, strictly matching keepIntervals
+  const skipCuts = useMemo(() => {
+    if (!keepIntervals || keepIntervals.length === 0 || !totalDuration || totalDuration <= 0.05) {
+      return []
+    }
+    const cuts: { id: number; start: number; end: number; targetTime: number }[] = []
+
+    // 1. Initial cut before the first kept interval (if any)
+    const firstStart = keepIntervals[0][0]
+    if (firstStart > 0.04) {
+      cuts.push({
+        id: 0,
+        start: 0.0,
+        end: firstStart,
+        targetTime: firstStart,
+      })
+    }
+
+    // 2. Cut gaps between consecutive kept intervals
+    for (let i = 0; i < keepIntervals.length - 1; i++) {
+      const curEnd = keepIntervals[i][1]
+      const nextStart = keepIntervals[i + 1][0]
+      if (nextStart > curEnd + 0.04) {
+        cuts.push({
+          id: cuts.length,
+          start: curEnd,
+          end: nextStart,
+          targetTime: nextStart,
+        })
+      }
+    }
+
+    // 3. Trailing cut after the last kept interval (if any)
+    const lastEnd = keepIntervals[keepIntervals.length - 1][1]
+    if (lastEnd < totalDuration - 0.04) {
+      cuts.push({
+        id: cuts.length,
+        start: lastEnd,
+        end: totalDuration,
+        targetTime: totalDuration,
+      })
+    }
+
+    return cuts
+  }, [keepIntervals, totalDuration])
 
   // Map original unedited timestamp to trimmed playback timestamp (matching Rust map_original_to_trimmed)
   const mapOriginalToTrimmed = useCallback(
@@ -973,12 +1033,22 @@ export default function App() {
   const seekTo = (time: number) => {
     const clamped = Math.max(0, Math.min(totalDuration || 0, time))
     setCurrentTime(clamped)
-    lastSkippedIdRef.current = null
     isSkippingRef.current = false
+    skippedCutIdRef.current = null
+    if (seekFallbackTimerRef.current) {
+      window.clearTimeout(seekFallbackTimerRef.current)
+      seekFallbackTimerRef.current = null
+    }
+    if (fadeAnimationRef.current) {
+      cancelAnimationFrame(fadeAnimationRef.current)
+      fadeAnimationRef.current = null
+    }
     if (videoRef.current) {
+      videoRef.current.muted = false
+      videoRef.current.volume = 1.0
       videoRef.current.currentTime = clamped
     }
-    if (bgVideoRef.current) {
+    if (bgVideoRef.current && framingMode === 'blur_9_16') {
       bgVideoRef.current.currentTime = clamped
     }
     if (bgAudioRef.current && bgAudioRef.current.duration) {
@@ -1006,73 +1076,162 @@ export default function App() {
     }
   }, [isCoverModalOpen])
 
-  // Real-time Auto-Skip Cut Silences during playback
+  // Seamless lookahead skip handler (checks at 60 fps / RAF frequency)
+  const checkSkip = useCallback(() => {
+    const video = videoRef.current
+    if (!video || !isPlaying) return
+
+    const t = video.currentTime
+
+    // If currently performing a seek or waiting for decoder, do nothing
+    if (isSkippingRef.current || video.seeking) {
+      return
+    }
+
+    // Release skip latch once playback has safely entered the kept segment
+    if (skippedCutIdRef.current !== null) {
+      const skippedCut = skipCuts.find((c) => c.id === skippedCutIdRef.current)
+      if (!skippedCut || t >= skippedCut.targetTime + 0.03 || t < skippedCut.start - 0.1) {
+        skippedCutIdRef.current = null
+      }
+    }
+
+    // Lookahead of 20ms to anticipate cut before playing stale silence
+    const LOOKAHEAD = 0.020
+    const checkTime = t + LOOKAHEAD
+
+    for (const cut of skipCuts) {
+      if (skippedCutIdRef.current === cut.id) continue
+
+      if (checkTime >= cut.start && t < cut.end) {
+        isSkippingRef.current = true
+        skippedCutIdRef.current = cut.id
+
+        if (fadeAnimationRef.current) {
+          cancelAnimationFrame(fadeAnimationRef.current)
+          fadeAnimationRef.current = null
+        }
+        if (seekFallbackTimerRef.current) {
+          window.clearTimeout(seekFallbackTimerRef.current)
+        }
+
+        // Soft micro-fade: immediately silence audio before seek to eliminate clicks/pops
+        video.volume = 0.0
+        video.muted = true
+
+        if (cut.targetTime >= totalDuration - 0.04) {
+          video.currentTime = totalDuration
+          video.pause()
+          bgVideoRef.current?.pause()
+          bgAudioRef.current?.pause()
+          setIsPlaying(false)
+          isSkippingRef.current = false
+          video.muted = false
+          video.volume = 1.0
+        } else {
+          video.currentTime = cut.targetTime
+
+          // Fallback safety timeout if browser fails to fire 'seeked' within 800ms
+          seekFallbackTimerRef.current = window.setTimeout(() => {
+            if (videoRef.current) {
+              videoRef.current.muted = false
+              videoRef.current.volume = 1.0
+            }
+            isSkippingRef.current = false
+          }, 800)
+        }
+        break
+      }
+    }
+  }, [isPlaying, skipCuts, totalDuration])
+
+  // High-frequency RAF loop for smooth 60fps cut lookahead detection
+  useEffect(() => {
+    if (!isPlaying) {
+      if (rafIdRef.current) {
+        cancelAnimationFrame(rafIdRef.current)
+        rafIdRef.current = null
+      }
+      return
+    }
+
+    let active = true
+    const loop = () => {
+      if (!active) return
+      checkSkip()
+      rafIdRef.current = requestAnimationFrame(loop)
+    }
+    rafIdRef.current = requestAnimationFrame(loop)
+
+    return () => {
+      active = false
+      if (rafIdRef.current) {
+        cancelAnimationFrame(rafIdRef.current)
+        rafIdRef.current = null
+      }
+    }
+  }, [isPlaying, checkSkip])
+
+  // Real-time timecode and auxiliary sync updates during playback
   const handleTimeUpdate = () => {
     if (!videoRef.current) return
     const t = videoRef.current.currentTime
     setCurrentTime(t)
 
-    if (bgVideoRef.current && Math.abs(bgVideoRef.current.currentTime - t) > 0.15) {
-      bgVideoRef.current.currentTime = t
-    }
-
+    // Background music drift check (only if drift > 0.8s)
     if (bgAudioRef.current && bgAudioRef.current.duration) {
       const expAudio = mapOriginalToTrimmed(t) % bgAudioRef.current.duration
-      if (Math.abs(bgAudioRef.current.currentTime - expAudio) > 0.35) {
+      if (Math.abs(bgAudioRef.current.currentTime - expAudio) > 0.8) {
         bgAudioRef.current.currentTime = expAudio
       }
     }
+  }
 
-    if (videoRef.current.seeking || isSkippingRef.current) return
+  // Handle video seeked event: restore audio cleanly with soft micro-fade-in
+  const handleVideoSeeked = () => {
+    const video = videoRef.current
+    if (!video) return
 
-    const PAD_OUT = 0.12 // 120ms natural voice decay tail
-    const PAD_IN = 0.10  // 100ms natural voice onset
+    if (seekFallbackTimerRef.current) {
+      window.clearTimeout(seekFallbackTimerRef.current)
+      seekFallbackTimerRef.current = null
+    }
 
-    const currentCut = items.find(
-      (item): item is { type: 'silence'; data: SilenceGap } => {
-        if (item.type !== 'silence' || !item.data.isCut) return false
-        const effStart = item.data.startTime <= 0.05 ? 0.0 : item.data.startTime + PAD_OUT
-        const effEnd = item.data.endTime >= totalDuration - 0.05 ? totalDuration : item.data.endTime - PAD_IN
-        return effEnd > effStart + 0.04 && t >= effStart && t < effEnd
+    isSkippingRef.current = false
+
+    // Smooth 30ms audio micro-fade-in to eliminate pops/clicks on resume
+    video.muted = false
+    video.volume = 0.0
+
+    if (fadeAnimationRef.current) {
+      cancelAnimationFrame(fadeAnimationRef.current)
+    }
+
+    const fadeStart = performance.now()
+    const fadeDuration = 30 // 30ms soft micro-fade
+
+    const rampVolume = (now: number) => {
+      const elapsed = now - fadeStart
+      const progress = Math.min(1.0, elapsed / fadeDuration)
+      if (videoRef.current) {
+        videoRef.current.volume = progress
       }
-    )
-
-    if (currentCut) {
-      if (lastSkippedIdRef.current !== currentCut.data.id) {
-        isSkippingRef.current = true
-        lastSkippedIdRef.current = currentCut.data.id
-
-        const effEnd = currentCut.data.endTime >= totalDuration - 0.05
-          ? totalDuration
-          : currentCut.data.endTime - PAD_IN
-        const targetTime = Math.min(totalDuration, effEnd + 0.01)
-
-        if (targetTime >= totalDuration) {
-          videoRef.current.currentTime = totalDuration
-          if (bgVideoRef.current) {
-            bgVideoRef.current.currentTime = totalDuration
-            bgVideoRef.current.pause()
-          }
-          if (bgAudioRef.current) {
-            bgAudioRef.current.pause()
-          }
-          videoRef.current.pause()
-          setIsPlaying(false)
-          isSkippingRef.current = false
-        } else {
-          videoRef.current.currentTime = targetTime
-          if (bgVideoRef.current) {
-            bgVideoRef.current.currentTime = targetTime
-          }
-          // Note: Background music is continuous across video cuts, matching the exported audio timeline.
-          // Therefore, do NOT force bgAudioRef to seek on cut-skip.
-          setTimeout(() => {
-            isSkippingRef.current = false
-          }, 40)
-        }
+      if (progress < 1.0) {
+        fadeAnimationRef.current = requestAnimationFrame(rampVolume)
+      } else {
+        fadeAnimationRef.current = null
       }
-    } else {
-      lastSkippedIdRef.current = null
+    }
+    fadeAnimationRef.current = requestAnimationFrame(rampVolume)
+
+    // Synchronize background music only if drift is significant
+    if (bgAudioRef.current && bgAudioRef.current.duration) {
+      const trimmedT = mapOriginalToTrimmed(video.currentTime)
+      const curBgT = bgAudioRef.current.currentTime
+      const targetBgT = trimmedT % bgAudioRef.current.duration
+      if (Math.abs(curBgT - targetBgT) > 0.4) {
+        bgAudioRef.current.currentTime = targetBgT
+      }
     }
   }
 
@@ -1203,6 +1362,7 @@ export default function App() {
         duckingPreset,
         subtitleSize,
         subtitlePosition,
+        transitionSmoothing,
       })
       alert(`Видео сохранено:\n${outputPath}`)
     } catch (err) {
@@ -1259,6 +1419,7 @@ export default function App() {
         duckingPreset,
         subtitleSize,
         subtitlePosition,
+        transitionSmoothing,
       })
       alert(`Видео для Reels/Shorts успешно сохранено:\n${outputPath}`)
     } catch (err) {
@@ -1320,6 +1481,7 @@ export default function App() {
         duckingPreset,
         subtitleSize,
         subtitlePosition,
+        transitionSmoothing,
       })
       alert(`Компактное видео для Telegram сохранено:\n${outputPath}`)
     } catch (err) {
@@ -1364,6 +1526,7 @@ export default function App() {
         bgMusicVolume,
         autoDucking,
         duckingPreset,
+        transitionSmoothing,
       })
       alert(`Аудиофайл успешно сохранён:\n${outputPath}`)
     } catch (err) {
@@ -1443,6 +1606,7 @@ export default function App() {
         cuts,
         totalDuration,
         phrases: phrasesToExport,
+        transitionSmoothing,
       })
       alert(`Субтитры сохранены:\n${outputPath}`)
     } catch (err) {
@@ -1480,6 +1644,7 @@ export default function App() {
         cuts,
         totalDuration,
         fps: 30.0,
+        transitionSmoothing,
       })
       alert(
         `Проект EDL экспортирован:\n${outputPath}\n\nИмпорт в Premiere Pro или DaVinci Resolve:\nFile → Import → Timeline`
@@ -2043,19 +2208,11 @@ export default function App() {
                       setIsPlaying(false)
                       bgVideoRef.current?.pause()
                       bgAudioRef.current?.pause()
-                    }}
-                    onSeeked={() => {
-                      if (videoRef.current) {
-                        const ct = videoRef.current.currentTime
-                        if (bgVideoRef.current) {
-                          bgVideoRef.current.currentTime = ct
-                        }
-                        if (bgAudioRef.current && bgAudioRef.current.duration) {
-                          const trimmedT = mapOriginalToTrimmed(ct)
-                          bgAudioRef.current.currentTime = trimmedT % bgAudioRef.current.duration
-                        }
+                      if (bgVideoRef.current && videoRef.current && framingMode === 'blur_9_16') {
+                        bgVideoRef.current.currentTime = videoRef.current.currentTime
                       }
                     }}
+                    onSeeked={handleVideoSeeked}
                     onEnded={() => {
                       setIsPlaying(false)
                       bgVideoRef.current?.pause()
@@ -2973,7 +3130,50 @@ export default function App() {
 
                 <div className="h-px bg-zinc-800 my-2" />
 
-                {/* 7. Whisper Model Selection */}
+                {/* 7. Transition Smoothing */}
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <label className="font-medium text-zinc-200 flex items-center gap-2">
+                      <SlidersHorizontal className="w-3.5 h-3.5 text-emerald-400" />
+                      <span>Сглаживание склеек</span>
+                    </label>
+                    <span className="font-sans text-zinc-400 text-xs">
+                      {transitionSmoothing === 'smooth' ? 'Мягкое (120 мс)' : 'Динамичное (70 мс)'}
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2.5">
+                    <button
+                      onClick={() => setTransitionSmoothing('smooth')}
+                      className={`p-2.5 rounded-lg border text-left transition ${
+                        transitionSmoothing === 'smooth'
+                          ? 'bg-zinc-100 text-zinc-950 border-white shadow-sm'
+                          : 'bg-zinc-950/60 text-zinc-400 border-zinc-800 hover:text-zinc-200'
+                      }`}
+                    >
+                      <div className="text-xs font-semibold">Мягкое</div>
+                      <div className={`text-[11px] mt-0.5 leading-snug ${transitionSmoothing === 'smooth' ? 'text-zinc-700' : 'text-zinc-500'}`}>
+                        Натуральный диалог, микро-фейды 40мс, запас речи 120мс
+                      </div>
+                    </button>
+                    <button
+                      onClick={() => setTransitionSmoothing('dynamic')}
+                      className={`p-2.5 rounded-lg border text-left transition ${
+                        transitionSmoothing === 'dynamic'
+                          ? 'bg-zinc-100 text-zinc-950 border-white shadow-sm'
+                          : 'bg-zinc-950/60 text-zinc-400 border-zinc-800 hover:text-zinc-200'
+                      }`}
+                    >
+                      <div className="text-xs font-semibold">Динамичное</div>
+                      <div className={`text-[11px] mt-0.5 leading-snug ${transitionSmoothing === 'dynamic' ? 'text-zinc-700' : 'text-zinc-500'}`}>
+                        Быстрый темп для рилс, 70мс
+                      </div>
+                    </button>
+                  </div>
+                </div>
+
+                <div className="h-px bg-zinc-800 my-2" />
+
+                {/* 8. Whisper Model Selection */}
                 <div className="space-y-1.5">
                   <div className="flex items-center justify-between">
                     <label className="font-medium text-zinc-200 flex items-center gap-2">

@@ -248,12 +248,14 @@ async fn export_trimmed_video_cmd(
     ducking_preset: Option<String>,
     subtitle_size: Option<u32>,
     subtitle_position: Option<String>,
+    transition_smoothing: Option<String>,
 ) -> Result<(), String> {
     let framing = framing_mode.unwrap_or_else(|| "original".to_string());
     let color = color_preset.unwrap_or_else(|| "none".to_string());
     let bg_vol = bg_music_volume.unwrap_or(0.15);
     let ducking = auto_ducking.unwrap_or(true);
     let sub_pos = subtitle_position;
+    let smoothing = transition_smoothing;
     tauri::async_runtime::spawn_blocking(move || {
         export_trimmed_video(
             &input_path,
@@ -273,6 +275,7 @@ async fn export_trimmed_video_cmd(
             ducking_preset.as_deref(),
             subtitle_size,
             sub_pos.as_deref(),
+            smoothing.as_deref(),
         )
     })
     .await
@@ -326,10 +329,12 @@ async fn export_audio_only_cmd(
     bg_music_volume: Option<f64>,
     auto_ducking: Option<bool>,
     ducking_preset: Option<String>,
+    transition_smoothing: Option<String>,
 ) -> Result<(), String> {
     let br = bitrate_kbps.unwrap_or(320);
     let bg_vol = bg_music_volume.unwrap_or(0.15);
     let ducking = auto_ducking.unwrap_or(true);
+    let smoothing = transition_smoothing;
     tauri::async_runtime::spawn_blocking(move || {
         export_audio_only(
             &input_path,
@@ -341,6 +346,7 @@ async fn export_audio_only_cmd(
             bg_vol,
             ducking,
             ducking_preset.as_deref(),
+            smoothing.as_deref(),
         )
     })
     .await
@@ -353,9 +359,11 @@ async fn export_subtitles_srt_cmd(
     cuts: Vec<(f64, f64)>,
     total_duration: f64,
     phrases: Vec<Phrase>,
+    transition_smoothing: Option<String>,
 ) -> Result<(), String> {
+    let smoothing = transition_smoothing;
     tauri::async_runtime::spawn_blocking(move || {
-        export_subtitles_srt(&phrases, &cuts, total_duration, &output_path)
+        export_subtitles_srt(&phrases, &cuts, total_duration, &output_path, smoothing.as_deref())
     })
     .await
     .map_err(|e| format!("Не удалось экспортировать субтитры: {}", e))?
@@ -368,10 +376,12 @@ async fn export_project_edl_cmd(
     cuts: Vec<(f64, f64)>,
     total_duration: f64,
     fps: Option<f64>,
+    transition_smoothing: Option<String>,
 ) -> Result<(), String> {
     let fps_val = fps.unwrap_or(30.0);
+    let smoothing = transition_smoothing;
     tauri::async_runtime::spawn_blocking(move || {
-        export_project_edl(&input_path, &cuts, total_duration, &output_path, fps_val)
+        export_project_edl(&input_path, &cuts, total_duration, &output_path, fps_val, smoothing.as_deref())
     })
     .await
     .map_err(|e| format!("Не удалось экспортировать проект EDL: {}", e))?

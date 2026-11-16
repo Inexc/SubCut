@@ -59,16 +59,19 @@ pub struct VideoInfo {
     pub fps: f64,
 }
 
-/// Helper to calculate keep intervals with speech edge padding (120ms decay / 100ms onset)
+/// Helper to calculate keep intervals with speech edge padding and configurable margins.
 /// Correctly handles empty cuts, overlapping cuts, out of bounds cuts, and NaN values.
 /// Preserves true video boundaries without creating micro-slivers at 0.0 or total_duration.
-pub fn calculate_keep_intervals(cut_intervals: &[(f64, f64)], total_duration: f64) -> Vec<(f64, f64)> {
+#[allow(dead_code)]
+pub fn calculate_keep_intervals_with_padding(
+    cut_intervals: &[(f64, f64)],
+    total_duration: f64,
+    pad_out: f64,
+    pad_in: f64,
+) -> Vec<(f64, f64)> {
     if !total_duration.is_finite() || total_duration <= 0.05 {
         return Vec::new();
     }
-
-    const PAD_OUT: f64 = 0.12; // preserve voice decay tail
-    const PAD_IN: f64 = 0.10;  // preserve breath onset
 
     // 1. Sanitize and sort raw cuts
     let mut valid_cuts = Vec::new();
@@ -98,19 +101,19 @@ pub fn calculate_keep_intervals(cut_intervals: &[(f64, f64)], total_duration: f6
 
     // 3. Apply padding to create effective cut intervals.
     // Boundary protection:
-    // If cut starts at 0.0, do not pad with PAD_OUT (there is no speech tail before 0.0).
-    // If cut ends at total_duration, do not pad with PAD_IN (there is no speech onset after video end).
+    // If cut starts at 0.0, do not pad with pad_out (there is no speech tail before 0.0).
+    // If cut ends at total_duration, do not pad with pad_in (there is no speech onset after video end).
     let mut eff_cuts: Vec<(f64, f64)> = Vec::new();
     for (cut_start, cut_end) in merged_raw {
         let eff_start = if cut_start <= 0.05 {
             0.0
         } else {
-            (cut_start + PAD_OUT).min(cut_end)
+            (cut_start + pad_out).min(cut_end)
         };
         let eff_end = if cut_end >= total_duration - 0.05 {
             total_duration
         } else {
-            (cut_end - PAD_IN).max(eff_start)
+            (cut_end - pad_in).max(eff_start)
         };
 
         if eff_end - eff_start > 0.04 {
@@ -140,6 +143,30 @@ pub fn calculate_keep_intervals(cut_intervals: &[(f64, f64)], total_duration: f6
     }
 
     keep_intervals
+}
+
+/// Helper to calculate keep intervals with preset transition smoothing modes:
+/// - "smooth" (default): 120ms decay / 100ms onset margins for natural dialogue.
+/// - "dynamic": 70ms decay / 70ms onset margins for fast-paced Reels/Shorts pacing.
+pub fn calculate_keep_intervals_with_smoothing(
+    cut_intervals: &[(f64, f64)],
+    total_duration: f64,
+    smoothing: &str,
+) -> Vec<(f64, f64)> {
+    let (pad_out, pad_in) = if smoothing == "dynamic" {
+        (0.07, 0.07)
+    } else {
+        (0.12, 0.10)
+    };
+    calculate_keep_intervals_with_padding(cut_intervals, total_duration, pad_out, pad_in)
+}
+
+/// Helper to calculate keep intervals with speech edge padding (120ms decay / 100ms onset)
+/// Correctly handles empty cuts, overlapping cuts, out of bounds cuts, and NaN values.
+/// Preserves true video boundaries without creating micro-slivers at 0.0 or total_duration.
+#[allow(dead_code)]
+pub fn calculate_keep_intervals(cut_intervals: &[(f64, f64)], total_duration: f64) -> Vec<(f64, f64)> {
+    calculate_keep_intervals_with_smoothing(cut_intervals, total_duration, "smooth")
 }
 
 /// Maps a timestamp from the original unedited video into the edited video timeline
@@ -205,6 +232,83 @@ pub fn calculate_telegram_video_bitrate(duration_sec: f64, max_megabytes: f64) -
     let video_kbps = (video_bits / dur / 1000.0).round() as u32;
     // Clamp between 300 kbps and 4500 kbps for safe quality and size
     video_kbps.clamp(300, 4500)
+}
+
+/// Helper to extract video stream framerate using ffprobe with safe fallback to 30.0 fps
+#[allow(dead_code)]
+pub fn get_video_fps(path: &str) -> f64 {
+    if let Ok(output) = new_command("ffprobe")
+        .args(&[
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=r_frame_rate",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            path,
+        ])
+        .output()
+    {
+        let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if let Some((num_s, den_s)) = s.split_once('/') {
+            if let (Ok(num), Ok(den)) = (num_s.parse::<f64>(), den_s.parse::<f64>()) {
+                if den > 0.0 && num > 0.0 {
+                    let fps = num / den;
+                    if fps.is_finite() && fps > 1.0 && fps <= 240.0 {
+                        return fps;
+                    }
+                }
+            }
+        } else if let Ok(val) = s.parse::<f64>() {
+            if val.is_finite() && val > 1.0 && val <= 240.0 {
+                return val;
+            }
+        }
+    }
+    30.0
+}
+
+/// Helper to extract video stream framerate expression for FFmpeg filters (e.g. "30000/1001", "60", "25")
+pub fn get_video_fps_str(path: &str) -> String {
+    if let Ok(output) = new_command("ffprobe")
+        .args(&[
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=r_frame_rate",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            path,
+        ])
+        .output()
+    {
+        let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if let Some((num_s, den_s)) = s.split_once('/') {
+            if let (Ok(num), Ok(den)) = (num_s.parse::<f64>(), den_s.parse::<f64>()) {
+                if den > 0.0 && num > 0.0 {
+                    let fps = num / den;
+                    if fps.is_finite() && fps > 1.0 && fps <= 240.0 {
+                        if (den - 1.0).abs() < 1e-6 {
+                            return format!("{}", num.round() as u64);
+                        }
+                        return format!("{}/{}", num.round() as u64, den.round() as u64);
+                    }
+                }
+            }
+        } else if let Ok(val) = s.parse::<f64>() {
+            if val.is_finite() && val > 1.0 && val <= 240.0 {
+                if val.fract().abs() < 1e-4 {
+                    return format!("{}", val.round() as u64);
+                }
+                return format!("{:.3}", val);
+            }
+        }
+    }
+    "30".to_string()
 }
 
 /// Helper to format frame count as EDL timecode format (HH:MM:SS:FF)
@@ -607,8 +711,10 @@ pub fn export_subtitles_srt(
     cut_intervals: &[(f64, f64)],
     total_duration: f64,
     output_path: &str,
+    transition_smoothing: Option<&str>,
 ) -> Result<(), String> {
-    let keep_intervals = calculate_keep_intervals(cut_intervals, total_duration);
+    let smoothing = transition_smoothing.unwrap_or("smooth");
+    let keep_intervals = calculate_keep_intervals_with_smoothing(cut_intervals, total_duration, smoothing);
     let chunked = chunk_phrases(phrases);
 
     let mut srt = String::new();
@@ -671,8 +777,10 @@ pub fn export_project_edl(
     total_duration: f64,
     output_path: &str,
     fps: f64,
+    transition_smoothing: Option<&str>,
 ) -> Result<(), String> {
-    let keep_intervals = calculate_keep_intervals(cut_intervals, total_duration);
+    let smoothing = transition_smoothing.unwrap_or("smooth");
+    let keep_intervals = calculate_keep_intervals_with_smoothing(cut_intervals, total_duration, smoothing);
 
     let clip_filename = Path::new(input_path)
         .file_name()
@@ -1067,6 +1175,7 @@ pub fn export_audio_only(
     bg_music_volume: f64,
     auto_ducking: bool,
     ducking_preset: Option<&str>,
+    transition_smoothing: Option<&str>,
 ) -> Result<(), String> {
     let has_audio = has_audio_stream(input_path);
     let has_bg = bg_music_path.map_or(false, |p| !p.trim().is_empty());
@@ -1082,7 +1191,8 @@ pub fn export_audio_only(
         }
     }
 
-    let keep_intervals = calculate_keep_intervals(cut_intervals, total_duration);
+    let smoothing = transition_smoothing.unwrap_or("smooth");
+    let keep_intervals = calculate_keep_intervals_with_smoothing(cut_intervals, total_duration, smoothing);
     if keep_intervals.is_empty() {
         return Err("Все фрагменты аудио вырезаны".into());
     }
@@ -1091,22 +1201,25 @@ pub fn export_audio_only(
     let mut filter_complex = String::new();
     let voice_concat_tag = if has_bg && has_audio { "[voice_concat]" } else { "[outa]" };
 
+    let max_fade = if smoothing == "dynamic" { 0.020 } else { 0.040 };
+
     if has_audio {
         let mut concat_inputs = String::new();
         for (i, &(start, end)) in keep_intervals.iter().enumerate() {
             let dur = end - start;
-            let fade_len = (dur * 0.10).min(0.025);
-            if fade_len >= 0.005 {
-                filter_complex.push_str(&format!(
-                    "[0:a]atrim=start={:.3}:end={:.3},asetpts=PTS-STARTPTS,afade=t=in:st=0:d={:.3},afade=t=out:st={:.3}:d={:.3}[a{}];",
-                    start, end, fade_len, (dur - fade_len).max(0.0), fade_len, i
-                ));
-            } else {
-                filter_complex.push_str(&format!(
-                    "[0:a]atrim=start={:.3}:end={:.3},asetpts=PTS-STARTPTS[a{}];",
-                    start, end, i
-                ));
+            let fade_len = (dur * 0.15).min(max_fade);
+            let should_fade_in = (i > 0 || start > 0.05) && fade_len >= 0.003;
+            let should_fade_out = (i + 1 < keep_intervals.len() || end < total_duration - 0.05) && fade_len >= 0.003;
+
+            let mut audio_filter = format!("[0:a]atrim=start={:.3}:end={:.3},asetpts=PTS-STARTPTS", start, end);
+            if should_fade_in {
+                audio_filter.push_str(&format!(",afade=t=in:st=0:d={:.3}", fade_len));
             }
+            if should_fade_out {
+                audio_filter.push_str(&format!(",afade=t=out:st={:.3}:d={:.3}", (dur - fade_len).max(0.0), fade_len));
+            }
+            audio_filter.push_str(&format!("[a{}];", i));
+            filter_complex.push_str(&audio_filter);
             concat_inputs.push_str(&format!("[a{}]", i));
         }
 
@@ -1195,8 +1308,10 @@ pub fn export_trimmed_video(
     ducking_preset: Option<&str>,
     subtitle_size: Option<u32>,
     subtitle_position: Option<&str>,
+    transition_smoothing: Option<&str>,
 ) -> Result<(), String> {
-    let keep_intervals = calculate_keep_intervals(cut_intervals, total_duration);
+    let smoothing = transition_smoothing.unwrap_or("smooth");
+    let keep_intervals = calculate_keep_intervals_with_smoothing(cut_intervals, total_duration, smoothing);
 
     if keep_intervals.is_empty() {
         return Err("Все фрагменты видео вырезаны".into());
@@ -1237,6 +1352,11 @@ pub fn export_trimmed_video(
         )?;
     }
 
+    // Video framerate detection for exact rate matching without frame drops/drift
+    let fps_str = get_video_fps_str(input_path);
+
+    let max_fade = if smoothing == "dynamic" { 0.020 } else { 0.040 };
+
     // Build filter_complex string
     let mut filter_complex = String::new();
     let mut concat_inputs = String::new();
@@ -1245,23 +1365,24 @@ pub fn export_trimmed_video(
         let dur = end - start;
 
         filter_complex.push_str(&format!(
-            "[0:v]trim=start={:.3}:end={:.3},setpts=PTS-STARTPTS[v{}];",
-            start, end, i
+            "[0:v]trim=start={:.3}:end={:.3},setpts=PTS-STARTPTS,fps={}[v{}];",
+            start, end, fps_str, i
         ));
 
         if has_audio {
-            let fade_len = (dur * 0.10).min(0.025); // audio fade length
-            if fade_len >= 0.005 {
-                filter_complex.push_str(&format!(
-                    "[0:a]atrim=start={:.3}:end={:.3},asetpts=PTS-STARTPTS,afade=t=in:st=0:d={:.3},afade=t=out:st={:.3}:d={:.3}[a{}];",
-                    start, end, fade_len, (dur - fade_len).max(0.0), fade_len, i
-                ));
-            } else {
-                filter_complex.push_str(&format!(
-                    "[0:a]atrim=start={:.3}:end={:.3},asetpts=PTS-STARTPTS[a{}];",
-                    start, end, i
-                ));
+            let fade_len = (dur * 0.15).min(max_fade);
+            let should_fade_in = (i > 0 || start > 0.05) && fade_len >= 0.003;
+            let should_fade_out = (i + 1 < keep_intervals.len() || end < total_duration - 0.05) && fade_len >= 0.003;
+
+            let mut audio_filter = format!("[0:a]atrim=start={:.3}:end={:.3},asetpts=PTS-STARTPTS", start, end);
+            if should_fade_in {
+                audio_filter.push_str(&format!(",afade=t=in:st=0:d={:.3}", fade_len));
             }
+            if should_fade_out {
+                audio_filter.push_str(&format!(",afade=t=out:st={:.3}:d={:.3}", (dur - fade_len).max(0.0), fade_len));
+            }
+            audio_filter.push_str(&format!("[a{}];", i));
+            filter_complex.push_str(&audio_filter);
             concat_inputs.push_str(&format!("[v{}][a{}]", i, i));
         } else {
             concat_inputs.push_str(&format!("[v{}]", i));
@@ -1688,7 +1809,7 @@ mod tests {
 
         // Cut covers 5.0 to 10.0 entirely (which contains p2)
         let cuts = vec![(5.0, 10.0)];
-        export_subtitles_srt(&phrases, &cuts, 20.0, &srt_str).unwrap();
+        export_subtitles_srt(&phrases, &cuts, 20.0, &srt_str, None).unwrap();
 
         let content = std::fs::read_to_string(&srt_path).unwrap();
         let _ = std::fs::remove_file(&srt_path);
@@ -1729,7 +1850,7 @@ mod tests {
         let edl_str = edl_path.to_string_lossy().to_string();
 
         let cuts = vec![(4.0, 8.0)];
-        export_project_edl("D:\\test\\sample.mp4", &cuts, 20.0, &edl_str, 30.0).unwrap();
+        export_project_edl("D:\\test\\sample.mp4", &cuts, 20.0, &edl_str, 30.0, None).unwrap();
 
         let content = std::fs::read_to_string(&edl_path).unwrap();
         let _ = std::fs::remove_file(&edl_path);
@@ -1911,7 +2032,7 @@ mod tests {
 
     #[test]
     fn test_export_audio_only_no_audio() {
-        let res = export_audio_only("non_existent_file.mp4", &[(0.0, 1.0)], 10.0, "out.mp3", 320, None, 0.15, true, None);
+        let res = export_audio_only("non_existent_file.mp4", &[(0.0, 1.0)], 10.0, "out.mp3", 320, None, 0.15, true, None, None);
         assert!(res.is_err());
         assert!(res.unwrap_err().contains("нет аудиодорожки"));
     }
@@ -2088,7 +2209,7 @@ mod tests {
             },
         ];
 
-        export_subtitles_srt(&phrases, &[], 10.0, &srt_str).unwrap();
+        export_subtitles_srt(&phrases, &[], 10.0, &srt_str, None).unwrap();
 
         let content = std::fs::read_to_string(&srt_path).unwrap();
         let _ = std::fs::remove_file(&srt_path);
@@ -2186,5 +2307,43 @@ mod tests {
         // p1 starts at 1.00 and must end before p2 starts at 1.12 (i.e. <= 1.10)
         assert!(content.contains("Dialogue: 0,0:00:01.00,0:00:01.10,Default"));
         assert!(content.contains("Dialogue: 0,0:00:01.12,"));
+    }
+
+    #[test]
+    fn test_calculate_keep_intervals_dynamic_smoothing() {
+        // Dynamic mode uses 70ms PAD_OUT and 70ms PAD_IN
+        let cuts = vec![(4.0, 8.0)];
+        let keep = calculate_keep_intervals_with_smoothing(&cuts, 20.0, "dynamic");
+        assert_eq!(keep.len(), 2);
+        // First interval should keep until 4.0 + 0.07 = 4.07
+        assert!((keep[0].1 - 4.07).abs() < 1e-4);
+        // Second interval should start at 8.0 - 0.07 = 7.93
+        assert!((keep[1].0 - 7.93).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_calculate_keep_intervals_smooth_vs_dynamic() {
+        let cuts = vec![(5.0, 10.0)];
+        let keep_smooth = calculate_keep_intervals_with_smoothing(&cuts, 20.0, "smooth");
+        let keep_dynamic = calculate_keep_intervals_with_smoothing(&cuts, 20.0, "dynamic");
+
+        assert_eq!(keep_smooth.len(), 2);
+        assert_eq!(keep_dynamic.len(), 2);
+        // Dynamic has tighter cuts (less padding kept)
+        let cut_span_smooth = keep_smooth[1].0 - keep_smooth[0].1;
+        let cut_span_dynamic = keep_dynamic[1].0 - keep_dynamic[0].1;
+        assert!(cut_span_dynamic > cut_span_smooth);
+    }
+
+    #[test]
+    fn test_get_video_fps_fallback() {
+        let fps = get_video_fps("non_existent_file_xyz_123.mp4");
+        assert_eq!(fps, 30.0);
+    }
+
+    #[test]
+    fn test_get_video_fps_str_fallback() {
+        let fps_str = get_video_fps_str("non_existent_file_xyz_123.mp4");
+        assert_eq!(fps_str, "30");
     }
 }
