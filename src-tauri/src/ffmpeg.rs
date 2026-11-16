@@ -236,8 +236,183 @@ impl<'a> Drop for TempFileGuard<'a> {
     }
 }
 
+/// Helper: does word end with sentence-ending punctuation?
+fn is_sentence_end_word(w: &str) -> bool {
+    let trimmed = w.trim_end_matches(|c: char| c == '"' || c == '\'' || c == '»' || c == ')' || c == '”' || c == ']');
+    trimmed.ends_with('.') || trimmed.ends_with('!') || trimmed.ends_with('?') || trimmed.ends_with('…')
+}
+
+/// Helper: does word end with clause punctuation?
+fn is_clause_end_word(w: &str) -> bool {
+    let trimmed = w.trim_end_matches(|c: char| c == '"' || c == '\'' || c == '»' || c == ')' || c == '”' || c == ']');
+    trimmed.ends_with(',') || trimmed.ends_with(';') || trimmed.ends_with(':') || trimmed.ends_with('—') || trimmed.ends_with('-')
+}
+
+/// Splits a potentially long speech Phrase into short, dynamic subtitle cues
+/// (split by sentence punctuation `.`, `!`, `?`, clause punctuation `,`, `;`, `:`, `—`,
+/// breath pauses >= 350ms, and max 4–6 words per cue).
+/// Each cue computes its exact start_time and end_time from its words.
+pub fn chunk_phrase(phrase: &Phrase, max_words_per_cue: usize) -> Vec<Phrase> {
+    let text = phrase.text.trim();
+    if text.is_empty() {
+        return Vec::new();
+    }
+
+    // If phrase has no word timestamps, synthesize word tokens with interpolated timestamps
+    let words: Vec<Word> = if phrase.words.is_empty() {
+        let tokens: Vec<&str> = text.split_whitespace().collect();
+        if tokens.is_empty() {
+            return Vec::new();
+        }
+        let dur = (phrase.end_time - phrase.start_time).max(0.1);
+        let total_chars: usize = tokens.iter().map(|t| t.chars().count()).sum();
+        let total_chars = total_chars.max(1) as f64;
+        let mut cur_time = phrase.start_time;
+        let mut synth = Vec::with_capacity(tokens.len());
+        for (idx, tok) in tokens.iter().enumerate() {
+            let tok_chars = tok.chars().count() as f64;
+            let tok_dur = (dur * (tok_chars / total_chars)).max(0.08);
+            let w_end = if idx == tokens.len() - 1 {
+                phrase.end_time.max(cur_time + tok_dur)
+            } else {
+                cur_time + tok_dur
+            };
+            synth.push(Word {
+                word: tok.to_string(),
+                start_time: ((cur_time * 100.0).round()) / 100.0,
+                end_time: ((w_end * 100.0).round()) / 100.0,
+            });
+            cur_time = w_end;
+        }
+        synth
+    } else {
+        let mut cleaned_words: Vec<Word> = Vec::with_capacity(phrase.words.len());
+        let mut last_t = phrase.start_time;
+        for w in &phrase.words {
+            let clean = w.word.trim();
+            if clean.is_empty() {
+                continue;
+            }
+            let w_start = w.start_time.max(last_t);
+            let w_end = w.end_time.max(w_start + 0.05);
+            last_t = w_start;
+            cleaned_words.push(Word {
+                word: clean.to_string(),
+                start_time: ((w_start * 100.0).round()) / 100.0,
+                end_time: ((w_end * 100.0).round()) / 100.0,
+            });
+        }
+        cleaned_words
+    };
+
+    if words.is_empty() {
+        return Vec::new();
+    }
+
+    let max_words = max_words_per_cue.clamp(3, 8);
+    let mut cues: Vec<Phrase> = Vec::new();
+    let mut current_words: Vec<Word> = Vec::new();
+    let n = words.len();
+
+    for i in 0..n {
+        let word = &words[i];
+        current_words.push(word.clone());
+
+        let is_last = i == n - 1;
+        let mut should_break = is_last;
+
+        if !is_last {
+            let next_word = &words[i + 1];
+            let pause_to_next = next_word.start_time - word.end_time;
+            let remaining = n - (i + 1);
+
+            if is_sentence_end_word(&word.word) {
+                // Sentence terminator (. ! ? …) -> finish cue immediately
+                should_break = true;
+            } else if pause_to_next >= 0.35 && !current_words.is_empty() {
+                // Breath pause (>= 350ms silence between spoken words)
+                should_break = true;
+            } else if is_clause_end_word(&word.word) && current_words.len() >= 3 {
+                // Clause punctuation with sufficient words
+                should_break = true;
+            } else if current_words.len() >= max_words {
+                // If only 1 orphan word remains in the sentence without punctuation, keep it together
+                if remaining == 1 && current_words.len() < max_words + 1 && !is_sentence_end_word(&next_word.word) {
+                    should_break = false;
+                } else {
+                    should_break = true;
+                }
+            }
+        }
+
+        if should_break && !current_words.is_empty() {
+            let c_start = current_words.first().unwrap().start_time;
+            let raw_end = current_words.last().unwrap().end_time;
+            let c_end = if !is_last {
+                let next_start = words[i + 1].start_time;
+                raw_end.min(next_start).max(c_start + 0.05)
+            } else {
+                raw_end.max(c_start + 0.20)
+            };
+            let c_text = current_words
+                .iter()
+                .map(|w| w.word.as_str())
+                .collect::<Vec<_>>()
+                .join(" ");
+            let cue_id = format!("{}-c{}", phrase.id, cues.len() + 1);
+
+            cues.push(Phrase {
+                id: cue_id,
+                speaker: phrase.speaker.clone(),
+                start_time: ((c_start * 100.0).round()) / 100.0,
+                end_time: ((c_end * 100.0).round()) / 100.0,
+                text: c_text,
+                words: std::mem::take(&mut current_words),
+            });
+        }
+    }
+
+    // Ensure consecutive cues strictly never overlap
+    for idx in 0..cues.len() {
+        if idx + 1 < cues.len() {
+            let next_start = cues[idx + 1].start_time;
+            if cues[idx].end_time > next_start {
+                cues[idx].end_time = next_start;
+            }
+        }
+    }
+
+    cues
+}
+
+/// Splits a list of phrases into short, dynamic cues (target 4–6 words or 1 short sentence per cue).
+pub fn chunk_phrases(phrases: &[Phrase]) -> Vec<Phrase> {
+    let mut result = Vec::new();
+    for p in phrases {
+        let chunked = chunk_phrase(p, 5);
+        if chunked.is_empty() {
+            if !p.text.trim().is_empty() {
+                result.push(p.clone());
+            }
+        } else {
+            result.extend(chunked);
+        }
+    }
+    // Re-index sequentially p-1, p-2... and guarantee non-overlapping
+    for idx in 0..result.len() {
+        if idx + 1 < result.len() {
+            let next_start = result[idx + 1].start_time;
+            if result[idx].end_time > next_start {
+                result[idx].end_time = next_start;
+            }
+        }
+        result[idx].id = format!("p-{}", idx + 1);
+    }
+    result
+}
+
 /// Generates an ASS subtitle file with configurable style presets (Hormozi, Classic, Box)
-/// Automatically skips phrases or words that fall into cut-out sections.
+/// Automatically splits phrases into short cues and skips words that fall into cut-out sections.
 pub fn generate_ass_subtitles(
     phrases: &[Phrase],
     keep_intervals: &[(f64, f64)],
@@ -246,6 +421,7 @@ pub fn generate_ass_subtitles(
     subtitle_size: Option<u32>,
     subtitle_position: Option<&str>,
 ) -> Result<(), String> {
+    let chunked = chunk_phrases(phrases);
     let mut ass = String::new();
     ass.push_str("[Script Info]\n");
     ass.push_str("ScriptType: v4.00+\n");
@@ -331,7 +507,7 @@ pub fn generate_ass_subtitles(
     ass.push_str("[Events]\n");
     ass.push_str("Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n");
 
-    for (i, p) in phrases.iter().enumerate() {
+    for (i, p) in chunked.iter().enumerate() {
         let text = p.text.trim();
         if text.is_empty() {
             continue;
@@ -347,7 +523,7 @@ pub fn generate_ass_subtitles(
 
         // Find the start of the next preserved phrase to prevent subtitle overlap
         let mut next_start_opt = None;
-        for next_p in &phrases[(i + 1)..] {
+        for next_p in &chunked[(i + 1)..] {
             let ns = map_original_to_trimmed(next_p.start_time, keep_intervals);
             let ne = map_original_to_trimmed(next_p.end_time, keep_intervals);
             if ne > ns + 0.04 {
@@ -356,13 +532,12 @@ pub fn generate_ass_subtitles(
             }
         }
 
-        let mut display_end = end;
+        // Subtitles disappear when speech finishes: tight decay (120ms), never extending across silence
+        let mut display_end = (end + 0.12).max(start + 0.20);
         if let Some(next_start) = next_start_opt {
-            if next_start > start + 0.05 {
-                display_end = display_end.max(start + 0.5).min(next_start - 0.05);
+            if next_start > start {
+                display_end = display_end.min(next_start - 0.02);
             }
-        } else {
-            display_end = display_end.max(start + 0.5);
         }
 
         if display_end > start + 0.05 {
@@ -434,11 +609,12 @@ pub fn export_subtitles_srt(
     output_path: &str,
 ) -> Result<(), String> {
     let keep_intervals = calculate_keep_intervals(cut_intervals, total_duration);
+    let chunked = chunk_phrases(phrases);
 
     let mut srt = String::new();
     let mut index = 1;
 
-    for (i, p) in phrases.iter().enumerate() {
+    for (i, p) in chunked.iter().enumerate() {
         let text = p.text.trim();
         if text.is_empty() {
             continue;
@@ -453,7 +629,7 @@ pub fn export_subtitles_srt(
         }
 
         let mut next_start_opt = None;
-        for next_p in &phrases[(i + 1)..] {
+        for next_p in &chunked[(i + 1)..] {
             let ns = map_original_to_trimmed(next_p.start_time, &keep_intervals);
             let ne = map_original_to_trimmed(next_p.end_time, &keep_intervals);
             if ne > ns + 0.04 {
@@ -462,13 +638,12 @@ pub fn export_subtitles_srt(
             }
         }
 
-        let mut display_end = end;
+        // Subtitles disappear when finished: tight decay (120ms), never extending across silence
+        let mut display_end = (end + 0.12).max(start + 0.20);
         if let Some(next_start) = next_start_opt {
-            if next_start > start + 0.05 {
-                display_end = display_end.max(start + 0.5).min(next_start - 0.05);
+            if next_start > start {
+                display_end = display_end.min(next_start - 0.02);
             }
-        } else {
-            display_end = display_end.max(start + 0.5);
         }
 
         if display_end > start + 0.05 {
@@ -1380,7 +1555,7 @@ pub fn transcribe_speech(path: &str, model_size: &str, language: &str) -> Result
 
     if !trimmed.is_empty() {
         if let Ok(phrases) = serde_json::from_str::<Vec<Phrase>>(trimmed) {
-            return Ok(phrases);
+            return Ok(chunk_phrases(&phrases));
         }
     }
 
@@ -1786,5 +1961,230 @@ mod tests {
         // Overflow clamp to 1.0
         let f_over = build_background_audio_filter(false, "[voice_concat]", 1, 2.5, false, None, 10.0);
         assert!(f_over.contains("volume=1.000"));
+    }
+
+    #[test]
+    fn test_chunk_phrase_long_sentence_with_punctuation() {
+        // Simulates a long Whisper segment with punctuation
+        let phrase = Phrase {
+            id: "p1".into(),
+            speaker: "Спикер".into(),
+            start_time: 0.0,
+            end_time: 12.0,
+            text: "Подрез цвета уже рукой подать, и не вздумай пока рожать! Мы сделаем всё вовремя.".into(),
+            words: vec![
+                Word { word: "Подрез".into(), start_time: 0.0, end_time: 0.6 },
+                Word { word: "цвета".into(), start_time: 0.6, end_time: 1.1 },
+                Word { word: "уже".into(), start_time: 1.1, end_time: 1.4 },
+                Word { word: "рукой".into(), start_time: 1.4, end_time: 1.9 },
+                Word { word: "подать,".into(), start_time: 1.9, end_time: 2.5 },
+                Word { word: "и".into(), start_time: 2.6, end_time: 2.8 },
+                Word { word: "не".into(), start_time: 2.8, end_time: 3.0 },
+                Word { word: "вздумай".into(), start_time: 3.0, end_time: 3.6 },
+                Word { word: "пока".into(), start_time: 3.6, end_time: 4.1 },
+                Word { word: "рожать!".into(), start_time: 4.1, end_time: 4.8 },
+                Word { word: "Мы".into(), start_time: 5.2, end_time: 5.5 },
+                Word { word: "сделаем".into(), start_time: 5.5, end_time: 6.1 },
+                Word { word: "всё".into(), start_time: 6.1, end_time: 6.5 },
+                Word { word: "вовремя.".into(), start_time: 6.5, end_time: 7.2 },
+            ],
+        };
+
+        let cues = chunk_phrase(&phrase, 5);
+        // Expect 3 cues:
+        // Cue 1: "Подрез цвета уже рукой подать," (stops on comma after 5 words)
+        // Cue 2: "и не вздумай пока рожать!" (stops on '!')
+        // Cue 3: "Мы сделаем всё вовремя." (stops on '.')
+        assert_eq!(cues.len(), 3);
+        assert_eq!(cues[0].text, "Подрез цвета уже рукой подать,");
+        assert_eq!(cues[0].start_time, 0.0);
+        assert_eq!(cues[0].end_time, 2.5);
+
+        assert_eq!(cues[1].text, "и не вздумай пока рожать!");
+        assert_eq!(cues[1].start_time, 2.6);
+        assert_eq!(cues[1].end_time, 4.8);
+
+        assert_eq!(cues[2].text, "Мы сделаем всё вовремя.");
+        assert_eq!(cues[2].start_time, 5.2);
+        assert_eq!(cues[2].end_time, 7.2);
+    }
+
+    #[test]
+    fn test_chunk_phrase_breath_pause() {
+        // Words without punctuation but with 600ms breath silence between words 2 and 3
+        let phrase = Phrase {
+            id: "p2".into(),
+            speaker: "Спикер".into(),
+            start_time: 1.0,
+            end_time: 6.0,
+            text: "Привет друзья рад вас видеть".into(),
+            words: vec![
+                Word { word: "Привет".into(), start_time: 1.0, end_time: 1.5 },
+                Word { word: "друзья".into(), start_time: 1.6, end_time: 2.1 },
+                // 600ms breath gap here: 2.1 to 2.7
+                Word { word: "рад".into(), start_time: 2.7, end_time: 3.1 },
+                Word { word: "вас".into(), start_time: 3.2, end_time: 3.5 },
+                Word { word: "видеть".into(), start_time: 3.6, end_time: 4.2 },
+            ],
+        };
+
+        let cues = chunk_phrase(&phrase, 5);
+        assert_eq!(cues.len(), 2);
+        assert_eq!(cues[0].text, "Привет друзья");
+        assert_eq!(cues[0].end_time, 2.1);
+        assert_eq!(cues[1].text, "рад вас видеть");
+        assert_eq!(cues[1].start_time, 2.7);
+    }
+
+    #[test]
+    fn test_chunk_phrase_synthesizes_words_when_empty() {
+        let phrase = Phrase {
+            id: "p3".into(),
+            speaker: "Спикер".into(),
+            start_time: 0.0,
+            end_time: 6.0,
+            text: "Раз два три четыре пять шесть семь восемь девять десять".into(),
+            words: vec![],
+        };
+
+        let cues = chunk_phrase(&phrase, 5);
+        // 10 words chunked with max_words=5 should produce 2 cues of 5 words each
+        assert_eq!(cues.len(), 2);
+        assert_eq!(cues[0].text, "Раз два три четыре пять");
+        assert_eq!(cues[1].text, "шесть семь восемь девять десять");
+        assert!(cues[0].start_time >= 0.0);
+        assert!(cues[1].end_time <= 6.05);
+    }
+
+    #[test]
+    fn test_subtitles_disappear_during_silence() {
+        let temp_dir = std::env::temp_dir();
+        let srt_path = temp_dir.join("test_silence_gap.srt");
+        let srt_str = srt_path.to_string_lossy().to_string();
+
+        let phrases = vec![
+            Phrase {
+                id: "p1".into(),
+                speaker: "S".into(),
+                start_time: 1.0,
+                end_time: 2.5,
+                text: "Короткая фраза".into(),
+                words: vec![
+                    Word { word: "Короткая".into(), start_time: 1.0, end_time: 1.7 },
+                    Word { word: "фраза".into(), start_time: 1.8, end_time: 2.5 },
+                ],
+            },
+            // 5 seconds of silence gap before p2
+            Phrase {
+                id: "p2".into(),
+                speaker: "S".into(),
+                start_time: 7.5,
+                end_time: 9.0,
+                text: "Вторая фраза".into(),
+                words: vec![
+                    Word { word: "Вторая".into(), start_time: 7.5, end_time: 8.2 },
+                    Word { word: "фраза".into(), start_time: 8.3, end_time: 9.0 },
+                ],
+            },
+        ];
+
+        export_subtitles_srt(&phrases, &[], 10.0, &srt_str).unwrap();
+
+        let content = std::fs::read_to_string(&srt_path).unwrap();
+        let _ = std::fs::remove_file(&srt_path);
+
+        // First cue must end around 2.62 (2.5 + 0.12s decay), NOT hang until 7.5s!
+        assert!(content.contains("00:00:01,000 --> 00:00:02,620"));
+        assert!(content.contains("00:00:07,500 --> 00:00:09,120"));
+    }
+
+    #[test]
+    fn test_chunk_phrase_no_overlap_consecutive_words() {
+        let phrase = Phrase {
+            id: "p_overlap".into(),
+            speaker: "Спикер".into(),
+            start_time: 0.0,
+            end_time: 1.0,
+            text: "Да. Погнали!".into(),
+            words: vec![
+                Word { word: "Да.".into(), start_time: 0.0, end_time: 0.1 },
+                Word { word: "Погнали!".into(), start_time: 0.1, end_time: 0.5 },
+            ],
+        };
+
+        let cues = chunk_phrase(&phrase, 5);
+        assert_eq!(cues.len(), 2);
+        assert!(
+            cues[0].end_time <= cues[1].start_time,
+            "cues[0].end_time ({}) must be <= cues[1].start_time ({})",
+            cues[0].end_time,
+            cues[1].start_time
+        );
+    }
+
+    #[test]
+    fn test_chunk_phrase_single_word_breath_pause() {
+        let phrase = Phrase {
+            id: "p_breath".into(),
+            speaker: "Спикер".into(),
+            start_time: 1.0,
+            end_time: 5.0,
+            text: "Стоп продолжаем запись".into(),
+            words: vec![
+                Word { word: "Стоп".into(), start_time: 1.0, end_time: 1.3 },
+                // 1500ms pause after 1st word
+                Word { word: "продолжаем".into(), start_time: 2.8, end_time: 3.5 },
+                Word { word: "запись".into(), start_time: 3.6, end_time: 4.2 },
+            ],
+        };
+
+        let cues = chunk_phrase(&phrase, 5);
+        assert_eq!(cues.len(), 2);
+        assert_eq!(cues[0].text, "Стоп");
+        assert_eq!(cues[0].start_time, 1.0);
+        assert!(cues[0].end_time <= 2.8);
+        assert_eq!(cues[1].text, "продолжаем запись");
+        assert_eq!(cues[1].start_time, 2.8);
+    }
+
+    #[test]
+    fn test_generate_ass_tight_gap_no_overlap() {
+        let temp_dir = std::env::temp_dir();
+        let ass_path = temp_dir.join("test_tight_ass.ass");
+        let ass_str = ass_path.to_string_lossy().to_string();
+
+        let phrases = vec![
+            Phrase {
+                id: "p1".into(),
+                speaker: "S".into(),
+                start_time: 1.0,
+                end_time: 1.1,
+                text: "Да.".into(),
+                words: vec![
+                    Word { word: "Да.".into(), start_time: 1.0, end_time: 1.1 },
+                ],
+            },
+            Phrase {
+                id: "p2".into(),
+                speaker: "S".into(),
+                start_time: 1.12,
+                end_time: 2.0,
+                text: "Поехали дальше.".into(),
+                words: vec![
+                    Word { word: "Поехали".into(), start_time: 1.12, end_time: 1.5 },
+                    Word { word: "дальше.".into(), start_time: 1.6, end_time: 2.0 },
+                ],
+            },
+        ];
+
+        let keep = vec![(0.0, 5.0)];
+        generate_ass_subtitles(&phrases, &keep, &ass_str, "classic", None, None).unwrap();
+
+        let content = std::fs::read_to_string(&ass_path).unwrap();
+        let _ = std::fs::remove_file(&ass_path);
+
+        // p1 starts at 1.00 and must end before p2 starts at 1.12 (i.e. <= 1.10)
+        assert!(content.contains("Dialogue: 0,0:00:01.00,0:00:01.10,Default"));
+        assert!(content.contains("Dialogue: 0,0:00:01.12,"));
     }
 }

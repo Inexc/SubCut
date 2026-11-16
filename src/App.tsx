@@ -72,6 +72,143 @@ type ScriptItem =
   | { type: 'phrase'; data: Phrase }
   | { type: 'silence'; data: SilenceGap }
 
+function isSentenceEnd(w: string): boolean {
+  const clean = w.replace(/["'»)”\]]+$/g, '')
+  return clean.endsWith('.') || clean.endsWith('!') || clean.endsWith('?') || clean.endsWith('…')
+}
+
+function isClauseEnd(w: string): boolean {
+  const clean = w.replace(/["'»)”\]]+$/g, '')
+  return clean.endsWith(',') || clean.endsWith(';') || clean.endsWith(':') || clean.endsWith('—') || clean.endsWith('-')
+}
+
+/**
+ * Splits a speech phrase into short dynamic subtitle cues
+ * (by punctuation . ! ? …, clause punctuation , ; : —,
+ * breath pauses >= 350ms, and max 4-6 words per cue).
+ */
+export function chunkPhrase(phrase: Phrase, maxWords: number = 5): Phrase[] {
+  const text = phrase.text.trim()
+  if (!text) return []
+
+  let words: Word[] = []
+  if (phrase.words && phrase.words.length > 0) {
+    let lastT = phrase.startTime
+    words = phrase.words
+      .filter((w) => w.word.trim().length > 0)
+      .map((w) => {
+        const ws = Math.max(lastT, Number(w.startTime.toFixed(2)))
+        const we = Math.max(ws + 0.05, Number(w.endTime.toFixed(2)))
+        lastT = ws
+        return {
+          word: w.word.trim(),
+          startTime: ws,
+          endTime: we,
+        }
+      })
+  } else {
+    const tokens = text.split(/\s+/).filter(Boolean)
+    if (tokens.length === 0) return []
+    const dur = Math.max(0.1, phrase.endTime - phrase.startTime)
+    const totalChars = Math.max(1, tokens.reduce((acc, t) => acc + t.length, 0))
+    let curTime = phrase.startTime
+    words = tokens.map((tok, idx) => {
+      const tokDur = Math.max(0.08, dur * (tok.length / totalChars))
+      const wEnd = idx === tokens.length - 1 ? Math.max(curTime + tokDur, phrase.endTime) : curTime + tokDur
+      const res = {
+        word: tok,
+        startTime: Number(curTime.toFixed(2)),
+        endTime: Number(wEnd.toFixed(2)),
+      }
+      curTime = wEnd
+      return res
+    })
+  }
+
+  if (words.length === 0) return []
+
+  const cues: Phrase[] = []
+  let currentWords: Word[] = []
+  const n = words.length
+
+  for (let i = 0; i < n; i++) {
+    const word = words[i]
+    currentWords.push(word)
+
+    const isLast = i === n - 1
+    let shouldBreak = isLast
+
+    if (!isLast) {
+      const nextWord = words[i + 1]
+      const pauseToNext = nextWord.startTime - word.endTime
+      const remaining = n - (i + 1)
+
+      if (isSentenceEnd(word.word)) {
+        shouldBreak = true
+      } else if (pauseToNext >= 0.35 && currentWords.length >= 1) {
+        shouldBreak = true
+      } else if (isClauseEnd(word.word) && currentWords.length >= 3) {
+        shouldBreak = true
+      } else if (currentWords.length >= maxWords) {
+        if (remaining === 1 && currentWords.length < maxWords + 1 && !isSentenceEnd(nextWord.word)) {
+          shouldBreak = false
+        } else {
+          shouldBreak = true
+        }
+      }
+    }
+
+    if (shouldBreak && currentWords.length > 0) {
+      const cStart = currentWords[0].startTime
+      const rawEnd = currentWords[currentWords.length - 1].endTime
+      const cEnd = !isLast
+        ? Math.max(Number((cStart + 0.05).toFixed(2)), Math.min(rawEnd, words[i + 1].startTime))
+        : Math.max(Number((cStart + 0.20).toFixed(2)), rawEnd)
+
+      const cText = currentWords.map((cw) => cw.word).join(' ')
+      cues.push({
+        id: `${phrase.id}-c${cues.length + 1}`,
+        speaker: phrase.speaker || 'Спикер',
+        startTime: Number(cStart.toFixed(2)),
+        endTime: Number(cEnd.toFixed(2)),
+        text: cText,
+        words: [...currentWords],
+      })
+      currentWords = []
+    }
+  }
+
+  // Ensure consecutive cues strictly never overlap
+  for (let idx = 0; idx < cues.length - 1; idx++) {
+    if (cues[idx].endTime > cues[idx + 1].startTime) {
+      cues[idx].endTime = cues[idx + 1].startTime
+    }
+  }
+
+  return cues
+}
+
+export function chunkPhrases(phrases: Phrase[]): Phrase[] {
+  const result: Phrase[] = []
+  for (const p of phrases) {
+    const chunked = chunkPhrase(p, 5)
+    if (chunked.length === 0) {
+      if (p.text.trim()) result.push(p)
+    } else {
+      result.push(...chunked)
+    }
+  }
+  for (let idx = 0; idx < result.length - 1; idx++) {
+    if (result[idx].endTime > result[idx + 1].startTime) {
+      result[idx].endTime = result[idx + 1].startTime
+    }
+  }
+  return result.map((cue, idx) => ({
+    ...cue,
+    id: `p-${idx + 1}`,
+  }))
+}
+
 const INITIAL_SCRIPT: ScriptItem[] = [
   {
     type: 'phrase',
@@ -79,14 +216,36 @@ const INITIAL_SCRIPT: ScriptItem[] = [
       id: 'p-1',
       speaker: 'Спикер',
       startTime: 0.0,
-      endTime: 3.45,
-      text: 'Привет! В этом видео покажем монтаж речи прямо по тексту.',
+      endTime: 0.5,
+      text: 'Привет!',
+      words: [{ word: 'Привет!', startTime: 0.0, endTime: 0.5 }],
+    },
+  },
+  {
+    type: 'phrase',
+    data: {
+      id: 'p-2',
+      speaker: 'Спикер',
+      startTime: 0.5,
+      endTime: 1.9,
+      text: 'В этом видео покажем',
       words: [
-        { word: 'Привет!', startTime: 0.0, endTime: 0.5 },
         { word: 'В', startTime: 0.5, endTime: 0.7 },
         { word: 'этом', startTime: 0.7, endTime: 1.0 },
         { word: 'видео', startTime: 1.0, endTime: 1.4 },
         { word: 'покажем', startTime: 1.4, endTime: 1.9 },
+      ],
+    },
+  },
+  {
+    type: 'phrase',
+    data: {
+      id: 'p-3',
+      speaker: 'Спикер',
+      startTime: 1.9,
+      endTime: 3.45,
+      text: 'монтаж речи по тексту.',
+      words: [
         { word: 'монтаж', startTime: 1.9, endTime: 2.4 },
         { word: 'речи', startTime: 2.4, endTime: 2.8 },
         { word: 'по тексту.', startTime: 2.8, endTime: 3.45 },
@@ -106,11 +265,32 @@ const INITIAL_SCRIPT: ScriptItem[] = [
   {
     type: 'phrase',
     data: {
-      id: 'p-2',
+      id: 'p-4',
       speaker: 'Спикер',
       startTime: 4.85,
+      endTime: 6.8,
+      text: 'Не нужно вручную резать',
+      words: [
+        { word: 'Не', startTime: 4.85, endTime: 5.1 },
+        { word: 'нужно', startTime: 5.1, endTime: 5.6 },
+        { word: 'вручную', startTime: 5.6, endTime: 6.2 },
+        { word: 'резать', startTime: 6.2, endTime: 6.8 },
+      ],
+    },
+  },
+  {
+    type: 'phrase',
+    data: {
+      id: 'p-5',
+      speaker: 'Спикер',
+      startTime: 6.8,
       endTime: 8.6,
-      text: 'Не нужно вручную резать таймлайн и искать паузы между словами.',
+      text: 'и искать паузы.',
+      words: [
+        { word: 'и', startTime: 6.8, endTime: 7.1 },
+        { word: 'искать', startTime: 7.1, endTime: 7.8 },
+        { word: 'паузы.', startTime: 7.8, endTime: 8.6 },
+      ],
     },
   },
   {
@@ -126,11 +306,31 @@ const INITIAL_SCRIPT: ScriptItem[] = [
   {
     type: 'phrase',
     data: {
-      id: 'p-3',
+      id: 'p-6',
       speaker: 'Спикер',
       startTime: 10.1,
+      endTime: 12.2,
+      text: 'SubCut находит тишину',
+      words: [
+        { word: 'SubCut', startTime: 10.1, endTime: 10.8 },
+        { word: 'находит', startTime: 10.8, endTime: 11.5 },
+        { word: 'тишину', startTime: 11.5, endTime: 12.2 },
+      ],
+    },
+  },
+  {
+    type: 'phrase',
+    data: {
+      id: 'p-7',
+      speaker: 'Спикер',
+      startTime: 12.2,
       endTime: 14.3,
-      text: 'SubCut находит тишину и удаляет лишнее.',
+      text: 'и удаляет лишнее.',
+      words: [
+        { word: 'и', startTime: 12.2, endTime: 12.6 },
+        { word: 'удаляет', startTime: 12.6, endTime: 13.4 },
+        { word: 'лишнее.', startTime: 13.4, endTime: 14.3 },
+      ],
     },
   },
   {
@@ -146,11 +346,31 @@ const INITIAL_SCRIPT: ScriptItem[] = [
   {
     type: 'phrase',
     data: {
-      id: 'p-4',
+      id: 'p-8',
       speaker: 'Спикер',
       startTime: 16.0,
+      endTime: 18.2,
+      text: 'Субтитры уже готовы,',
+      words: [
+        { word: 'Субтитры', startTime: 16.0, endTime: 16.9 },
+        { word: 'уже', startTime: 16.9, endTime: 17.4 },
+        { word: 'готовы,', startTime: 17.4, endTime: 18.2 },
+      ],
+    },
+  },
+  {
+    type: 'phrase',
+    data: {
+      id: 'p-9',
+      speaker: 'Спикер',
+      startTime: 18.2,
       endTime: 20.4,
-      text: 'Субтитры готовы — остаётся проверить результат.',
+      text: 'остаётся проверить результат.',
+      words: [
+        { word: 'остаётся', startTime: 18.2, endTime: 19.0 },
+        { word: 'проверить', startTime: 19.0, endTime: 19.7 },
+        { word: 'результат.', startTime: 19.7, endTime: 20.4 },
+      ],
     },
   },
 ]
@@ -372,14 +592,34 @@ export default function App() {
     }
   }
 
-  // Active phrase calculation
-  const phraseList = items.filter((i): i is { type: 'phrase'; data: Phrase } => i.type === 'phrase')
+  // Active phrase cue calculation (disappears when finished, advances in sync with speech)
+  const phraseList = useMemo(
+    () => items.filter((i): i is { type: 'phrase'; data: Phrase } => i.type === 'phrase'),
+    [items]
+  )
   const activePhraseIndex = phraseList.findIndex((p, idx) => {
     const nextPhrase = phraseList[idx + 1]
-    const maxEnd = nextPhrase ? Math.min(p.data.endTime + 0.35, nextPhrase.data.startTime) : p.data.endTime + 0.35
-    return currentTime >= p.data.startTime && currentTime <= maxEnd
+    const cueEnd = nextPhrase
+      ? Math.min(p.data.endTime + 0.12, nextPhrase.data.startTime)
+      : p.data.endTime + 0.12
+    return (
+      currentTime >= p.data.startTime &&
+      currentTime <= cueEnd &&
+      (!nextPhrase || currentTime < nextPhrase.data.startTime)
+    )
   })
   const activePhrase = activePhraseIndex >= 0 ? phraseList[activePhraseIndex] : null
+
+  // Auto-scroll transcript editor to follow speech during playback
+  const activePhraseCardRef = useRef<HTMLDivElement | null>(null)
+  useEffect(() => {
+    if (isPlaying && activePhraseCardRef.current) {
+      activePhraseCardRef.current.scrollIntoView({
+        behavior: 'smooth',
+        block: 'nearest',
+      })
+    }
+  }, [activePhrase?.data.id, isPlaying])
 
   // Target background music volume considering ducking depth
   const duckingFactor = duckingPreset === 'soft' ? 0.32 : duckingPreset === 'hard' ? 0.12 : 0.20
@@ -532,11 +772,12 @@ export default function App() {
       setAnalyzingStatus('Распознавание речи...')
       let phrases: Phrase[] = []
       try {
-        phrases = await invoke<Phrase[]>('transcribe_speech_cmd', {
+        const rawPhrases = await invoke<Phrase[]>('transcribe_speech_cmd', {
           path: selected,
           modelSize: whisperModel,
           language: speechLanguage,
         })
+        phrases = chunkPhrases(rawPhrases)
       } catch (wErr) {
         console.warn('Whisper transcription warning:', wErr)
       }
@@ -666,11 +907,12 @@ export default function App() {
     try {
       setIsAnalyzing(true)
       setAnalyzingStatus('Распознавание речи...')
-      const phrases = await invoke<Phrase[]>('transcribe_speech_cmd', {
+      const rawPhrases = await invoke<Phrase[]>('transcribe_speech_cmd', {
         path: filePath,
         modelSize: whisperModel,
         language: speechLanguage,
       })
+      const phrases = chunkPhrases(rawPhrases)
 
       let finalGaps: SilenceGap[] = []
       if (pauseMode === 'smart' && phrases.length > 0) {
@@ -1300,16 +1542,23 @@ export default function App() {
   return (
     <div className="flex flex-col h-screen w-screen bg-zinc-950 text-zinc-100 font-sans select-none overflow-hidden">
       
-      {/* 1. TOP APP BAR (48px) */}
-      <header className="h-12 px-4 border-b border-zinc-800 bg-zinc-900/80 backdrop-blur flex items-center justify-between flex-shrink-0 z-20">
+      {/* 1. STUDIO APP BAR (52px) */}
+      <header className="h-13 py-2 px-4 border-b border-zinc-800/80 bg-zinc-950/90 backdrop-blur-xl flex items-center justify-between flex-shrink-0 z-20">
         
-        {/* Left: Branding & Open File */}
+        {/* Left: Branding & File Info */}
         <div className="flex items-center gap-3">
-          <div className="flex items-center gap-2">
-            <div className="w-7 h-7 rounded-md bg-zinc-800 border border-zinc-700/80 flex items-center justify-center text-zinc-200 shadow-sm">
-              <Scissors className="w-3.5 h-3.5" />
+          <div className="flex items-center gap-2.5">
+            <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-indigo-500 via-purple-500 to-pink-500 p-[1px] shadow-sm flex-shrink-0">
+              <div className="w-full h-full bg-zinc-950 rounded-[7px] flex items-center justify-center text-white">
+                <Scissors className="w-4 h-4 text-zinc-100" />
+              </div>
             </div>
-            <span className="text-sm font-semibold tracking-tight text-zinc-100">SubCut</span>
+            <div className="flex items-center gap-1.5">
+              <span className="text-sm font-bold tracking-tight text-white">SubCut</span>
+              <span className="text-[10px] font-mono uppercase tracking-wider font-semibold px-1.5 py-0.5 rounded bg-zinc-900 text-zinc-400 border border-zinc-800">
+                Studio
+              </span>
+            </div>
           </div>
 
           <div className="h-4 w-px bg-zinc-800" />
@@ -1318,7 +1567,7 @@ export default function App() {
           <button
             onClick={handleOpenFile}
             disabled={isAnalyzing}
-            className="flex items-center gap-2 h-8 px-3 rounded-md bg-zinc-800/80 hover:bg-zinc-800 border border-zinc-700/70 text-xs font-medium text-zinc-200 hover:text-white transition max-w-xs truncate shadow-sm disabled:opacity-50"
+            className="flex items-center gap-2 h-8 px-3 rounded-lg bg-zinc-900/90 hover:bg-zinc-800 border border-zinc-800 hover:border-zinc-700 text-xs font-medium text-zinc-200 hover:text-white transition max-w-xs truncate shadow-sm disabled:opacity-50"
             title="Выбрать видео для монтажа"
           >
             <FolderOpen className="w-3.5 h-3.5 text-zinc-400 flex-shrink-0" />
@@ -1329,29 +1578,81 @@ export default function App() {
 
           {/* Clean File Info Metrics Pill */}
           {filePath && (
-            <div className="hidden sm:flex items-center gap-2.5 px-3 h-8 rounded-md bg-zinc-900/90 border border-zinc-800 text-xs font-mono tabular-nums text-zinc-400">
+            <div className="hidden lg:flex items-center gap-2 px-2.5 h-8 rounded-lg bg-zinc-900/60 border border-zinc-800/80 text-xs font-mono tabular-nums text-zinc-400">
               <span className="text-zinc-200 font-medium">{formatTime(totalDuration)}</span>
-              <span className="text-zinc-600">•</span>
-              <span>Пауз: <strong className="text-zinc-200 font-medium">{silences.length}</strong></span>
+              <span className="text-zinc-700">•</span>
+              <span>{phraseList.length} фраз</span>
+              <span className="text-zinc-700">•</span>
+              <span>{silences.length} пауз</span>
               {cutDuration > 0 && (
                 <>
-                  <span className="text-zinc-600">•</span>
-                  <span className="text-emerald-400 font-medium">-{cutDuration.toFixed(1)} с</span>
+                  <span className="text-zinc-700">•</span>
+                  <span className="text-emerald-400 font-semibold">-{cutDuration.toFixed(1)} с</span>
                 </>
               )}
             </div>
           )}
         </div>
 
-        {/* Right: Actions & Subtitle Preset / Settings */}
-        <div className="flex items-center gap-2">
-          
-          {/* Subtitles Quick Toggle & Dropdown */}
+        {/* Center: Framing, Colors & Subtitles Toolbar */}
+        <div className="hidden md:flex items-center gap-2">
+          {/* Framing mode segmented control */}
+          <div className="flex items-center p-0.5 rounded-lg bg-zinc-900/90 border border-zinc-800 shadow-sm">
+            <button
+              onClick={() => setFramingMode('original')}
+              className={`h-7 px-2.5 rounded-md text-xs font-medium transition flex items-center gap-1.5 ${
+                framingMode === 'original'
+                  ? 'bg-zinc-800 text-zinc-100 shadow-sm font-semibold'
+                  : 'text-zinc-400 hover:text-zinc-200'
+              }`}
+              title="Оригинальный формат кадра"
+            >
+              <Monitor className="w-3.5 h-3.5" />
+              <span>Оригинал</span>
+            </button>
+            <button
+              onClick={() => setFramingMode('blur_9_16')}
+              className={`h-7 px-2.5 rounded-md text-xs font-medium transition flex items-center gap-1.5 ${
+                framingMode === 'blur_9_16'
+                  ? 'bg-indigo-950/80 text-indigo-200 border border-indigo-700/70 shadow-sm font-semibold'
+                  : 'text-zinc-400 hover:text-zinc-200'
+              }`}
+              title="9:16 с размытием фона для Reels/Shorts"
+            >
+              <Smartphone className="w-3.5 h-3.5 text-indigo-400" />
+              <span>9:16 Reels</span>
+            </button>
+          </div>
+
+          {/* Color Presets segmented control */}
+          <div className="flex items-center p-0.5 rounded-lg bg-zinc-900/90 border border-zinc-800 shadow-sm">
+            <Palette className="w-3.5 h-3.5 text-zinc-400 ml-2 mr-1" />
+            {[
+              { id: 'none' as const, label: 'Ориг' },
+              { id: 'anime_punch' as const, label: 'Anime' },
+              { id: 'cinematic' as const, label: 'Кино' },
+              { id: 'crisp' as const, label: 'Чётко' },
+            ].map((cp) => (
+              <button
+                key={cp.id}
+                onClick={() => setColorPreset(cp.id)}
+                className={`h-7 px-2 rounded-md text-xs font-medium transition ${
+                  colorPreset === cp.id
+                    ? 'bg-zinc-800 text-zinc-100 font-semibold shadow-sm'
+                    : 'text-zinc-400 hover:text-zinc-200'
+                }`}
+              >
+                {cp.label}
+              </button>
+            ))}
+          </div>
+
+          {/* Subtitles Quick Toggle & Popover */}
           <div className="relative">
             <div
-              className={`h-8 rounded-md border flex items-center transition shadow-sm ${
+              className={`h-8 rounded-lg border flex items-center transition shadow-sm ${
                 burnSubtitles
-                  ? 'bg-zinc-800 text-zinc-100 border-zinc-600'
+                  ? 'bg-zinc-800 text-zinc-100 border-zinc-700'
                   : 'bg-zinc-900/60 text-zinc-400 border-zinc-800 hover:text-zinc-200'
               }`}
             >
@@ -1362,10 +1663,10 @@ export default function App() {
                   if (!nextVal) setIsSubtitleMenuOpen(false)
                 }}
                 className="h-full px-2.5 flex items-center gap-1.5 text-xs font-medium hover:text-white transition"
-                title={burnSubtitles ? 'Отключить вшивание субтитров' : 'Включить вшивание субтитров'}
+                title={burnSubtitles ? 'Отключить субтитры' : 'Включить субтитры'}
               >
-                <Type className="w-3.5 h-3.5" />
-                <span className="hidden lg:inline">Субтитры</span>
+                <Type className={`w-3.5 h-3.5 ${burnSubtitles ? 'text-amber-400' : 'text-zinc-500'}`} />
+                <span>Субтитры</span>
               </button>
               {burnSubtitles && (
                 <button
@@ -1373,7 +1674,7 @@ export default function App() {
                     setIsSubtitleMenuOpen(!isSubtitleMenuOpen)
                     setIsExportMenuOpen(false)
                   }}
-                  className="h-full px-2.5 border-l border-zinc-700/80 hover:bg-zinc-700/50 flex items-center gap-1.5 text-xs font-sans font-medium transition text-amber-300"
+                  className="h-full px-2 border-l border-zinc-700/80 hover:bg-zinc-700/50 flex items-center gap-1.5 text-xs font-medium transition text-amber-300"
                   title="Настроить субтитры: размер, стиль, положение"
                 >
                   <span>
@@ -1428,7 +1729,7 @@ export default function App() {
                         onClick={() => setSubtitlePreset(st.id)}
                         className={`py-1.5 px-2 rounded-md border text-center transition font-medium text-xs ${
                           subtitlePreset === st.id
-                            ? 'bg-zinc-100 text-zinc-950 border-white shadow-sm'
+                            ? 'bg-zinc-100 text-zinc-950 border-white shadow-sm font-semibold'
                             : 'bg-zinc-950/60 text-zinc-400 border-zinc-800 hover:text-zinc-200'
                         }`}
                       >
@@ -1496,7 +1797,7 @@ export default function App() {
                         onClick={() => setSubtitlePosition(pos.id)}
                         className={`py-1.5 px-2 rounded-md border text-center transition font-medium text-xs ${
                           subtitlePosition === pos.id
-                            ? 'bg-zinc-100 text-zinc-950 border-white shadow-sm'
+                            ? 'bg-zinc-100 text-zinc-950 border-white shadow-sm font-semibold'
                             : 'bg-zinc-950/60 text-zinc-400 border-zinc-800 hover:text-zinc-200'
                         }`}
                       >
@@ -1508,8 +1809,12 @@ export default function App() {
               </div>
             )}
           </div>
+        </div>
 
-          {/* Background Music Quick Button */}
+        {/* Right: Studio Tools & Primary CTA Export */}
+        <div className="flex items-center gap-2">
+          
+          {/* Background Music Button */}
           <button
             onClick={() => {
               if (!bgMusicPath) {
@@ -1518,70 +1823,21 @@ export default function App() {
                 setIsSettingsOpen(true)
               }
             }}
-            className={`h-8 px-3 rounded-md text-xs font-medium border flex items-center gap-2 transition shadow-sm ${
+            className={`h-8 px-2.5 rounded-lg text-xs font-medium border flex items-center gap-1.5 transition shadow-sm ${
               bgMusicPath
-                ? 'bg-indigo-950/70 text-indigo-200 border-indigo-700/80 hover:bg-indigo-900/60'
-                : 'bg-zinc-800/80 hover:bg-zinc-800 text-zinc-300 hover:text-white border-zinc-700/70'
+                ? 'bg-indigo-950/80 text-indigo-200 border-indigo-700/80 hover:bg-indigo-900/60'
+                : 'bg-zinc-900 hover:bg-zinc-800 text-zinc-300 hover:text-white border-zinc-800'
             }`}
             title={bgMusicPath ? `Фоновая музыка: ${bgMusicName} (${Math.round(bgMusicVolume * 100)}%)` : 'Выбрать фоновую музыку'}
           >
             <Music className={`w-3.5 h-3.5 ${bgMusicPath ? 'text-indigo-400' : 'text-zinc-400'}`} />
-            <span className="hidden md:inline">Музыка</span>
+            <span className="hidden sm:inline">Музыка</span>
             {bgMusicPath && (
               <span className="text-[10px] font-mono tabular-nums px-1.5 py-0.5 rounded bg-indigo-900/80 text-indigo-200 font-semibold">
                 {Math.round(bgMusicVolume * 100)}%
               </span>
             )}
           </button>
-
-          {/* Settings Modal Button */}
-          <button
-            onClick={() => {
-              setIsSettingsOpen(!isSettingsOpen)
-              setIsSubtitleMenuOpen(false)
-              setIsExportMenuOpen(false)
-            }}
-            className={`h-8 px-3 rounded-md text-xs font-medium border flex items-center gap-2 transition shadow-sm ${
-              isSettingsOpen
-                ? 'bg-zinc-700 text-white border-zinc-500'
-                : 'bg-zinc-800/80 hover:bg-zinc-800 text-zinc-300 hover:text-white border-zinc-700/70'
-            }`}
-            title="Параметры монтажа и субтитров"
-          >
-            <SlidersHorizontal className="w-3.5 h-3.5 text-zinc-400" />
-            <span className="hidden md:inline">Параметры</span>
-          </button>
-
-          <div className="h-4 w-px bg-zinc-800" />
-
-          {/* Pause Visibility Toggle */}
-          <button
-            onClick={() => setShowPauses(!showPauses)}
-            className="h-8 px-3 rounded-md text-xs font-medium bg-zinc-800/80 hover:bg-zinc-800 border border-zinc-700/70 text-zinc-300 hover:text-white flex items-center gap-2 transition shadow-sm"
-            title="Показать или скрыть паузы в тексте"
-          >
-            {showPauses ? <Eye className="w-3.5 h-3.5 text-zinc-400" /> : <EyeOff className="w-3.5 h-3.5 text-zinc-500" />}
-            <span className="hidden md:inline">Паузы</span>
-          </button>
-
-          {/* Batch Cut/Restore Action */}
-          {activeCuts.length === silences.length && silences.length > 0 ? (
-            <button
-              onClick={handleRestoreAll}
-              className="h-8 px-3 rounded-md text-xs font-medium bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-zinc-200 flex items-center gap-2 transition shadow-sm"
-            >
-              <RotateCcw className="w-3.5 h-3.5 text-zinc-400" />
-              <span>Восстановить</span>
-            </button>
-          ) : (
-            <button
-              onClick={handleCutAll}
-              className="h-8 px-3 rounded-md text-xs font-medium bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-red-300 hover:text-red-200 flex items-center gap-2 transition shadow-sm"
-            >
-              <Scissors className="w-3.5 h-3.5 text-red-400" />
-              <span>Вырезать всё</span>
-            </button>
-          )}
 
           {/* Smart Cover Generator Button */}
           <button
@@ -1592,23 +1848,42 @@ export default function App() {
                 setIsPlaying(false)
               }
               if (!coverTitle) {
-                const punchy = phraseList.find((p) => p.data.text.length >= 10 && p.data.text.length <= 60) || phraseList[0]
+                const punchy = phraseList.find((p) => p.data.text.length >= 8 && p.data.text.length <= 50) || phraseList[0]
                 if (punchy) setCoverTitle(punchy.data.text)
               }
               updateCoverTime(currentTime)
               setIsCoverModalOpen(true)
             }}
             disabled={!filePath || isAnalyzing}
-            className="h-8 px-3 rounded-md text-xs font-medium bg-zinc-800/80 hover:bg-zinc-800 border border-zinc-700/70 text-zinc-300 hover:text-white flex items-center gap-2 transition disabled:opacity-40 shadow-sm"
+            className="h-8 px-2.5 rounded-lg text-xs font-medium bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-zinc-300 hover:text-white flex items-center gap-1.5 transition disabled:opacity-40 shadow-sm"
             title="Генератор обложки для Reels и Shorts"
           >
             <ImageIcon className="w-3.5 h-3.5 text-indigo-400" />
             <span className="hidden sm:inline">Обложка</span>
           </button>
 
-          {/* Export Dropdown */}
+          {/* Settings Modal Button */}
+          <button
+            onClick={() => {
+              setIsSettingsOpen(!isSettingsOpen)
+              setIsSubtitleMenuOpen(false)
+              setIsExportMenuOpen(false)
+            }}
+            className={`h-8 px-2.5 rounded-lg text-xs font-medium border flex items-center gap-1.5 transition shadow-sm ${
+              isSettingsOpen
+                ? 'bg-zinc-700 text-white border-zinc-500'
+                : 'bg-zinc-900 hover:bg-zinc-800 text-zinc-300 hover:text-white border-zinc-800'
+            }`}
+            title="Параметры монтажа и субтитров"
+          >
+            <SlidersHorizontal className="w-3.5 h-3.5 text-zinc-400" />
+            <span className="hidden xl:inline">Параметры</span>
+          </button>
+
+          <div className="h-4 w-px bg-zinc-800 mx-0.5" />
+
+          {/* Distinct Primary CTA: Export Dropdown */}
           <div className="relative">
-            {/* Export Menu Backdrop */}
             {isExportMenuOpen && (
               <div
                 className="fixed inset-0 z-30 bg-transparent"
@@ -1621,11 +1896,11 @@ export default function App() {
                 setIsSubtitleMenuOpen(false)
               }}
               disabled={isExporting || isAnalyzing}
-              className="h-8 px-3.5 rounded-md text-xs font-semibold bg-zinc-100 hover:bg-white text-zinc-950 flex items-center gap-2 transition shadow-md disabled:opacity-50"
+              className="h-8 px-3.5 rounded-lg text-xs font-semibold bg-white hover:bg-zinc-100 text-zinc-950 flex items-center gap-1.5 transition shadow-md shadow-white/5 border border-white/20 active:scale-[0.98] disabled:opacity-50"
             >
-              <Download className="w-3.5 h-3.5" />
+              <Download className="w-3.5 h-3.5 stroke-[2.5]" />
               <span>{isExporting ? 'Экспорт...' : 'Экспорт'}</span>
-              <ChevronDown className="w-3 h-3 text-zinc-700 -mr-0.5" />
+              <ChevronDown className="w-3.5 h-3.5 text-zinc-700 -mr-0.5" />
             </button>
 
             {/* Export Menu Dropdown */}
@@ -1714,66 +1989,19 @@ export default function App() {
         }}
       >
         
-        {/* LEFT PANE: Video Player */}
-        <section className="w-[50%] lg:w-[48%] border-r border-zinc-800 bg-zinc-950 flex flex-col justify-between p-4 flex-shrink-0">
+        {/* LEFT PANE: Video Player Stage */}
+        <section className="w-[50%] lg:w-[48%] border-r border-zinc-800/80 bg-zinc-950 flex flex-col justify-between p-4 flex-shrink-0 relative overflow-hidden">
           
-          {/* Top Player Toolbar: Framing Mode & Visual Color Preset */}
-          <div className="flex items-center justify-between mb-2.5 px-0.5 text-xs flex-shrink-0">
-            {/* Framing mode toggle */}
-            <div className="flex items-center p-0.5 rounded-lg bg-zinc-900/90 border border-zinc-800 shadow-sm">
-              <button
-                onClick={() => setFramingMode('original')}
-                className={`h-7 px-2.5 rounded-md text-xs font-medium transition flex items-center gap-1.5 ${
-                  framingMode === 'original'
-                    ? 'bg-zinc-800 text-zinc-100 shadow-sm'
-                    : 'text-zinc-400 hover:text-zinc-200'
-                }`}
-                title="Оригинальный формат кадра"
-              >
-                <Monitor className="w-3.5 h-3.5" />
-                <span>Оригинал</span>
-              </button>
-              <button
-                onClick={() => setFramingMode('blur_9_16')}
-                className={`h-7 px-2.5 rounded-md text-xs font-medium transition flex items-center gap-1.5 ${
-                  framingMode === 'blur_9_16'
-                    ? 'bg-indigo-950/80 text-indigo-200 border border-indigo-700/70 shadow-sm'
-                    : 'text-zinc-400 hover:text-zinc-200'
-                }`}
-                title="9:16 с размытием фона для Reels/Shorts"
-              >
-                <Smartphone className="w-3.5 h-3.5" />
-                <span>9:16 размытие</span>
-              </button>
-            </div>
-
-            {/* Visual Color Presets */}
-            <div className="flex items-center p-0.5 rounded-lg bg-zinc-900/90 border border-zinc-800 shadow-sm">
-              <Palette className="w-3.5 h-3.5 text-zinc-400 ml-2 mr-1" />
-              {[
-                { id: 'none' as const, label: 'Ориг' },
-                { id: 'anime_punch' as const, label: 'Anime' },
-                { id: 'cinematic' as const, label: 'Кино' },
-                { id: 'crisp' as const, label: 'Чётко' },
-              ].map((cp) => (
-                <button
-                  key={cp.id}
-                  onClick={() => setColorPreset(cp.id)}
-                  className={`h-7 px-2 rounded-md text-xs font-medium transition ${
-                    colorPreset === cp.id
-                      ? 'bg-zinc-800 text-zinc-100 font-semibold shadow-sm'
-                      : 'text-zinc-400 hover:text-zinc-200'
-                  }`}
-                >
-                  {cp.label}
-                </button>
-              ))}
-            </div>
-          </div>
+          {/* Ambient backdrop glow behind stage */}
+          <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-80 h-80 bg-gradient-to-tr from-indigo-500/10 via-purple-500/5 to-amber-500/10 rounded-full blur-3xl pointer-events-none -z-0" />
 
           {/* Framed Video Container */}
-          <div className="relative flex-1 flex items-center justify-center min-h-0">
-            <div className={`relative ${framingMode === 'blur_9_16' ? 'aspect-[9/16]' : 'max-w-full'} h-full max-h-[520px] bg-black rounded-xl border border-zinc-800 shadow-2xl flex items-center justify-center select-none overflow-hidden`}>
+          <div className="relative flex-1 flex items-center justify-center min-h-0 z-10 w-full">
+            <div
+              className={`relative ${
+                framingMode === 'blur_9_16' ? 'aspect-[9/16] h-full max-h-full' : 'w-full h-full max-h-full'
+              } bg-black/95 rounded-2xl border border-zinc-800/90 ring-1 ring-white/10 shadow-[0_16px_48px_-12px_rgba(0,0,0,0.95)] flex items-center justify-center select-none overflow-hidden`}
+            >
               
               {videoSrc ? (
                 <>
@@ -1880,11 +2108,11 @@ export default function App() {
                 </div>
               )}
 
-              {/* Subtitle Overlay */}
-              {burnSubtitles && (activePhrase || (filePath && (isSubtitleMenuOpen || isSettingsOpen))) && (() => {
-                const phraseData = activePhrase?.data || (phraseList.length > 0 ? phraseList[0].data : {
+              {/* Subtitle Overlay (Disappears during silence, shows 1 short cue at a time synced with speech) */}
+              {burnSubtitles && (activePhrase || (!videoSrc && (isSubtitleMenuOpen || isSettingsOpen))) && (() => {
+                const phraseData = activePhrase?.data || {
                   id: 'preview',
-                  speaker: 'S',
+                  speaker: 'Спикер',
                   startTime: 0,
                   endTime: 2,
                   text: 'Пример оформления субтитров',
@@ -1893,7 +2121,7 @@ export default function App() {
                     { word: 'оформления', startTime: 0.7, endTime: 1.3 },
                     { word: 'субтитров', startTime: 1.4, endTime: 2.0 },
                   ],
-                })
+                }
                 const isPreview = !activePhrase
 
                 return (
@@ -1923,7 +2151,7 @@ export default function App() {
                                 key={wIdx}
                                 className={`inline-block mx-0.5 px-1 font-black tracking-wide uppercase transition-colors duration-75 ${
                                   isWordActive
-                                    ? 'text-amber-300 scale-105 drop-shadow-[0_0_8px_rgba(252,211,77,0.85)]'
+                                    ? 'text-amber-300 scale-105 drop-shadow-[0_0_12px_rgba(252,211,77,0.9)]'
                                     : 'text-white'
                                 }`}
                               >
@@ -1969,99 +2197,145 @@ export default function App() {
             </div>
           </div>
 
-          {/* Transport Bar */}
-          <div className="flex items-center justify-between pt-3 mt-2.5 border-t border-zinc-900 text-xs flex-shrink-0">
-            <div className="flex items-center gap-2">
+          {/* Floating Transport Bar */}
+          <div className="pt-3 mt-2 border-t border-zinc-900/80 flex items-center justify-between text-xs flex-shrink-0 z-10">
+            <div className="flex items-center gap-1.5">
               <button
                 onClick={() => seekTo(0)}
-                className="w-8 h-8 rounded-md bg-zinc-900/80 hover:bg-zinc-800 border border-zinc-800 text-zinc-400 hover:text-zinc-200 flex items-center justify-center transition shadow-sm"
-                title="В начало"
+                className="w-8 h-8 rounded-lg bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-zinc-400 hover:text-zinc-200 flex items-center justify-center transition shadow-sm"
+                title="В начало (Home)"
               >
                 <SkipBack className="w-4 h-4" />
               </button>
               <button
                 onClick={() => seekTo(currentTime - 2)}
-                className="h-8 px-2.5 rounded-md bg-zinc-900/80 hover:bg-zinc-800 border border-zinc-800 text-zinc-400 hover:text-zinc-200 flex items-center gap-1 font-mono text-xs tabular-nums transition shadow-sm"
-                title="Назад на 2 секунды"
+                className="h-8 px-2.5 rounded-lg bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-zinc-400 hover:text-zinc-200 flex items-center gap-1 font-mono text-xs tabular-nums transition shadow-sm"
+                title="Назад на 2 сек (←)"
               >
                 <span>-2с</span>
               </button>
+              
+              {/* Primary circular play/pause button */}
               <button
                 onClick={togglePlay}
-                className="h-8 w-24 rounded-md bg-zinc-100 hover:bg-white text-zinc-950 font-semibold flex items-center justify-center gap-2 transition shadow-sm"
+                className="h-9 w-24 rounded-full bg-white hover:bg-zinc-100 text-zinc-950 font-semibold flex items-center justify-center gap-2 transition shadow-md active:scale-95 mx-1"
+                title="Воспроизведение / Пауза (Пробел)"
               >
-                {isPlaying ? <Pause className="w-4 h-4 fill-current" /> : <Play className="w-4 h-4 fill-current" />}
+                {isPlaying ? <Pause className="w-4 h-4 fill-current" /> : <Play className="w-4 h-4 fill-current ml-0.5" />}
                 <span className="text-xs">{isPlaying ? 'Пауза' : 'Старт'}</span>
               </button>
+
               <button
                 onClick={() => seekTo(currentTime + 2)}
-                className="h-8 px-2.5 rounded-md bg-zinc-900/80 hover:bg-zinc-800 border border-zinc-800 text-zinc-400 hover:text-zinc-200 flex items-center gap-1 font-mono text-xs tabular-nums transition shadow-sm"
-                title="Вперёд на 2 секунды"
+                className="h-8 px-2.5 rounded-lg bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-zinc-400 hover:text-zinc-200 flex items-center gap-1 font-mono text-xs tabular-nums transition shadow-sm"
+                title="Вперёд на 2 сек (→)"
               >
                 <span>+2с</span>
               </button>
               <button
                 onClick={() => seekTo(totalDuration)}
-                className="w-8 h-8 rounded-md bg-zinc-900/80 hover:bg-zinc-800 border border-zinc-800 text-zinc-400 hover:text-zinc-200 flex items-center justify-center transition shadow-sm"
-                title="В конец"
+                className="w-8 h-8 rounded-lg bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-zinc-400 hover:text-zinc-200 flex items-center justify-center transition shadow-sm"
+                title="В конец (End)"
               >
                 <SkipForward className="w-4 h-4" />
               </button>
             </div>
 
-            <div className="flex items-center gap-2.5 font-mono tabular-nums text-xs">
-              <span className="text-zinc-400">
-                <strong className="text-zinc-200 font-semibold">{formatTime(currentTime)}</strong> / {formatTime(totalDuration)}
+            {/* Timecode display */}
+            <div className="flex items-center gap-2 font-mono tabular-nums text-xs">
+              <span className="px-2.5 py-1 rounded-md bg-zinc-900 border border-zinc-800/80 text-zinc-300">
+                <strong className="text-white font-semibold">{formatTime(currentTime)}</strong>
+                <span className="text-zinc-600 mx-1">/</span>
+                <span className="text-zinc-400">{formatTime(totalDuration)}</span>
               </span>
-              <span className="text-zinc-600">•</span>
-              <span className="text-zinc-400">
-                Итог: <strong className="text-emerald-400 font-semibold">{formatTime(remainingDuration)}</strong>
-              </span>
+              {cutDuration > 0 && (
+                <span className="hidden sm:inline-flex items-center gap-1 px-2 py-1 rounded-md bg-emerald-950/40 border border-emerald-800/50 text-emerald-300 text-xs">
+                  Итог: <strong>{formatTime(remainingDuration)}</strong>
+                </span>
+              )}
             </div>
           </div>
 
         </section>
 
-        {/* RIGHT PANE: Script & Text */}
+        {/* RIGHT PANE: Transcript Stage (Скрипт) */}
         <section className="flex-1 bg-zinc-900/40 flex flex-col overflow-hidden">
           
           {/* Header & Search */}
-          <div className="h-12 px-4 border-b border-zinc-800 bg-zinc-900/80 backdrop-blur flex items-center justify-between flex-shrink-0">
+          <div className="h-13 py-2 px-4 border-b border-zinc-800/80 bg-zinc-950/80 backdrop-blur-xl flex items-center justify-between flex-shrink-0">
             <div className="flex items-center gap-2.5">
               <FileText className="w-4 h-4 text-zinc-400" />
               <span className="text-xs font-semibold text-zinc-200 uppercase tracking-wider">
-                Скрипт и редакция текста
+                Скрипт
               </span>
               <span className="text-xs font-mono tabular-nums px-2.5 py-0.5 rounded-full bg-zinc-800/80 text-zinc-400 border border-zinc-700/60">
                 {phraseList.length} фраз • {silences.length} пауз
               </span>
             </div>
             
-            <div className="relative w-56">
-              <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-zinc-500 pointer-events-none" />
-              <input
-                type="text"
-                placeholder="Поиск по тексту..."
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                className="w-full h-8 pl-8 pr-7 rounded-md bg-zinc-950/80 border border-zinc-800 text-xs text-zinc-200 placeholder-zinc-500 focus:outline-none focus:border-zinc-600 transition"
-              />
-              {searchQuery && (
+            <div className="flex items-center gap-2">
+              {/* Pause Visibility Toggle */}
+              <button
+                onClick={() => setShowPauses(!showPauses)}
+                className={`h-8 px-2.5 rounded-lg text-xs font-medium border flex items-center gap-1.5 transition shadow-sm ${
+                  showPauses
+                    ? 'bg-zinc-800 text-zinc-200 border-zinc-700'
+                    : 'bg-zinc-900 text-zinc-500 border-zinc-800'
+                }`}
+                title="Показать или скрыть паузы в тексте"
+              >
+                {showPauses ? <Eye className="w-3.5 h-3.5 text-zinc-400" /> : <EyeOff className="w-3.5 h-3.5 text-zinc-500" />}
+                <span className="hidden sm:inline">Паузы</span>
+              </button>
+
+              {/* Batch Cut/Restore Action */}
+              {activeCuts.length === silences.length && silences.length > 0 ? (
                 <button
-                  onClick={() => setSearchQuery('')}
-                  className="w-4 h-4 absolute right-2 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-zinc-300 flex items-center justify-center"
+                  onClick={handleRestoreAll}
+                  className="h-8 px-2.5 rounded-lg text-xs font-medium bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-zinc-200 flex items-center gap-1.5 transition shadow-sm"
+                  title="Восстановить все паузы"
                 >
-                  <X className="w-3 h-3" />
+                  <RotateCcw className="w-3.5 h-3.5 text-zinc-400" />
+                  <span className="hidden sm:inline">Восстановить</span>
+                </button>
+              ) : (
+                <button
+                  onClick={handleCutAll}
+                  className="h-8 px-2.5 rounded-lg text-xs font-medium bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-red-300 hover:text-red-200 flex items-center gap-1.5 transition shadow-sm"
+                  title="Вырезать все найденные паузы"
+                >
+                  <Scissors className="w-3.5 h-3.5 text-red-400" />
+                  <span className="hidden sm:inline">Вырезать всё</span>
                 </button>
               )}
+
+              {/* Search in transcript */}
+              <div className="relative w-48 sm:w-56">
+                <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-zinc-500 pointer-events-none" />
+                <input
+                  type="text"
+                  placeholder="Поиск по тексту..."
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  className="w-full h-8 pl-8 pr-7 rounded-lg bg-zinc-950/80 border border-zinc-800 text-xs text-zinc-200 placeholder-zinc-500 focus:outline-none focus:border-zinc-600 transition"
+                />
+                {searchQuery && (
+                  <button
+                    onClick={() => setSearchQuery('')}
+                    className="w-4 h-4 absolute right-2 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-zinc-300 flex items-center justify-center"
+                  >
+                    <X className="w-3 h-3" />
+                  </button>
+                )}
+              </div>
             </div>
           </div>
 
-          {/* Subheader Status Bar (Fixed outside of scroll area) */}
-          <div className="h-8 px-4 border-b border-zinc-800/60 bg-zinc-900/50 flex items-center justify-between text-xs font-sans text-zinc-400 flex-shrink-0">
+          {/* Subheader Status Bar */}
+          <div className="h-8 px-4 border-b border-zinc-800/60 bg-zinc-950/50 flex items-center justify-between text-xs font-sans text-zinc-400 flex-shrink-0">
             <div className="flex items-center gap-1.5 text-zinc-400">
               <Zap className="w-3.5 h-3.5 text-zinc-500 shrink-0" />
-              <span>Клик по таймкоду — переход, по паузе — переключение вырезки</span>
+              <span>Клик по фразе — переход, по паузе — вырезка</span>
             </div>
             <div className="flex items-center gap-1.5 text-xs font-mono tabular-nums text-zinc-400">
               <span>Whisper: <strong className="text-zinc-200 font-medium">{whisperModel}</strong></span>
@@ -2071,7 +2345,7 @@ export default function App() {
           </div>
 
           {/* Script Body */}
-          <div className="flex-1 overflow-y-auto p-4 md:p-5 space-y-3">
+          <div className="flex-1 overflow-y-auto p-4 md:p-5 space-y-2.5">
 
             {(() => {
               const isSearching = searchQuery.trim() !== ''
@@ -2098,14 +2372,19 @@ export default function App() {
                   return (
                     <div
                       key={item.data.id}
+                      ref={isActive ? activePhraseCardRef : undefined}
                       className={`group transition-all rounded-xl p-3 border ${
                         isActive
-                          ? 'bg-zinc-900/90 border-amber-500/40 shadow-lg shadow-amber-950/20 ring-1 ring-amber-500/20'
+                          ? 'bg-zinc-900/95 border-amber-400/50 border-l-4 border-l-amber-400 shadow-lg shadow-amber-950/20 ring-1 ring-amber-400/30'
                           : 'bg-zinc-900/40 border-zinc-800/80 hover:bg-zinc-900/70 hover:border-zinc-700/80'
                       }`}
                     >
                       {/* Header: Speaker Tag, Timecode Jump, Duration, Active Badge */}
-                      <div className="flex items-center justify-between text-xs mb-2 select-none">
+                      <div
+                        onClick={() => seekTo(item.data.startTime)}
+                        className="flex items-center justify-between text-xs mb-2 select-none cursor-pointer"
+                        title="Нажмите для перехода к фразе"
+                      >
                         <div className="flex items-center gap-2">
                           <div className="inline-flex items-center gap-1.5 px-2.5 h-6 rounded-full bg-zinc-800/90 border border-zinc-700/60 text-xs font-sans font-medium text-zinc-200 shadow-sm">
                             <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 shrink-0" />
@@ -2152,7 +2431,7 @@ export default function App() {
 
                   const isCut = item.data.isCut
                   return (
-                    <div key={item.data.id} className="relative flex items-center justify-center my-2.5 select-none">
+                    <div key={item.data.id} className="relative flex items-center justify-center my-2 select-none">
                       <div className="absolute inset-0 flex items-center" aria-hidden="true">
                         <div
                           className={`w-full border-t transition-colors ${
@@ -2172,7 +2451,7 @@ export default function App() {
                         title={isCut ? 'Пауза вырезана. Нажмите, чтобы восстановить.' : 'Пауза остаётся в видео. Нажмите, чтобы вырезать.'}
                       >
                         <Scissors className={`w-3.5 h-3.5 shrink-0 ${isCut ? 'text-zinc-500' : 'text-red-400'}`} />
-                        <span className={isCut ? 'text-zinc-500' : 'text-zinc-300 font-medium'}>
+                        <span className={isCut ? 'text-zinc-500 line-through' : 'text-zinc-300 font-medium'}>
                           Пауза {item.data.duration.toFixed(1)} с
                         </span>
                         <span
