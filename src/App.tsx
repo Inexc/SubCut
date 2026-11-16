@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useMemo, useCallback } from 'react'
+import { useState, useRef, useEffect, useLayoutEffect, useMemo, useCallback } from 'react'
 import { invoke, convertFileSrc } from '@tauri-apps/api/core'
 import {
   Scissors,
@@ -168,6 +168,47 @@ function formatTime(seconds: number): string {
   const secs = Math.floor(seconds % 60)
   const ms = Math.floor((seconds % 1) * 10)
   return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}.${ms}`
+}
+
+interface AutoResizeTextareaProps {
+  value: string
+  onChange: (val: string) => void
+  className?: string
+  placeholder?: string
+}
+
+function AutoResizeTextarea({ value, onChange, className, placeholder }: AutoResizeTextareaProps) {
+  const textareaRef = useRef<HTMLTextAreaElement>(null)
+
+  const adjustHeight = useCallback(() => {
+    const el = textareaRef.current
+    if (!el) return
+    el.style.height = 'auto'
+    el.style.height = `${el.scrollHeight}px`
+  }, [])
+
+  useLayoutEffect(() => {
+    adjustHeight()
+  }, [value, adjustHeight])
+
+  useEffect(() => {
+    window.addEventListener('resize', adjustHeight)
+    return () => window.removeEventListener('resize', adjustHeight)
+  }, [adjustHeight])
+
+  return (
+    <textarea
+      ref={textareaRef}
+      value={value}
+      onChange={(e) => {
+        onChange(e.target.value)
+      }}
+      rows={1}
+      placeholder={placeholder}
+      className={className}
+      style={{ fieldSizing: 'content' } as React.CSSProperties}
+    />
+  )
 }
 
 export default function App() {
@@ -1259,26 +1300,26 @@ export default function App() {
   return (
     <div className="flex flex-col h-screen w-screen bg-zinc-950 text-zinc-100 font-sans select-none overflow-hidden">
       
-      {/* 1. TOP APP BAR (44px) */}
-      <header className="h-11 px-4 border-b border-zinc-800/80 bg-zinc-900/60 flex items-center justify-between flex-shrink-0 z-20">
+      {/* 1. TOP APP BAR (48px) */}
+      <header className="h-12 px-4 border-b border-zinc-800 bg-zinc-900/80 backdrop-blur flex items-center justify-between flex-shrink-0 z-20">
         
         {/* Left: Branding & Open File */}
         <div className="flex items-center gap-3">
           <div className="flex items-center gap-2">
-            <div className="w-6 h-6 rounded bg-zinc-800 border border-zinc-700 flex items-center justify-center text-zinc-300">
+            <div className="w-7 h-7 rounded-md bg-zinc-800 border border-zinc-700/80 flex items-center justify-center text-zinc-200 shadow-sm">
               <Scissors className="w-3.5 h-3.5" />
             </div>
-            <span className="text-xs font-semibold tracking-tight text-zinc-200">SubCut</span>
+            <span className="text-sm font-semibold tracking-tight text-zinc-100">SubCut</span>
           </div>
 
-          <div className="h-3.5 w-px bg-zinc-800" />
+          <div className="h-4 w-px bg-zinc-800" />
 
           {/* Clickable File Selector */}
           <button
             onClick={handleOpenFile}
             disabled={isAnalyzing}
-            className="flex items-center gap-2 h-7 px-2.5 rounded bg-zinc-800/60 hover:bg-zinc-800 border border-zinc-700/60 text-xs text-zinc-300 hover:text-white transition max-w-sm truncate"
-            title="Выбрать видео"
+            className="flex items-center gap-2 h-8 px-3 rounded-md bg-zinc-800/80 hover:bg-zinc-800 border border-zinc-700/70 text-xs font-medium text-zinc-200 hover:text-white transition max-w-xs truncate shadow-sm disabled:opacity-50"
+            title="Выбрать видео для монтажа"
           >
             <FolderOpen className="w-3.5 h-3.5 text-zinc-400 flex-shrink-0" />
             <span className="font-mono truncate">
@@ -1286,18 +1327,20 @@ export default function App() {
             </span>
           </button>
 
-          {/* Quick Metrics */}
-          <div className="hidden sm:flex items-center gap-2 text-xs font-mono text-zinc-500">
-            <span>{formatTime(totalDuration)}</span>
-            <span>•</span>
-            <span className="text-zinc-400">Паузы: {silences.length}</span>
-            {cutDuration > 0 && (
-              <>
-                <span>•</span>
-                <span className="text-emerald-400 font-medium">-{cutDuration.toFixed(1)} с</span>
-              </>
-            )}
-          </div>
+          {/* Clean File Info Metrics Pill */}
+          {filePath && (
+            <div className="hidden sm:flex items-center gap-2.5 px-3 h-8 rounded-md bg-zinc-900/90 border border-zinc-800 text-xs font-mono tabular-nums text-zinc-400">
+              <span className="text-zinc-200 font-medium">{formatTime(totalDuration)}</span>
+              <span className="text-zinc-600">•</span>
+              <span>Пауз: <strong className="text-zinc-200 font-medium">{silences.length}</strong></span>
+              {cutDuration > 0 && (
+                <>
+                  <span className="text-zinc-600">•</span>
+                  <span className="text-emerald-400 font-medium">-{cutDuration.toFixed(1)} с</span>
+                </>
+              )}
+            </div>
+          )}
         </div>
 
         {/* Right: Actions & Subtitle Preset / Settings */}
@@ -1306,10 +1349,10 @@ export default function App() {
           {/* Subtitles Quick Toggle & Dropdown */}
           <div className="relative">
             <div
-              className={`h-7 rounded border flex items-center transition ${
+              className={`h-8 rounded-md border flex items-center transition shadow-sm ${
                 burnSubtitles
-                  ? 'bg-zinc-800 text-zinc-200 border-zinc-600'
-                  : 'bg-zinc-900/60 text-zinc-500 border-zinc-800 hover:text-zinc-300'
+                  ? 'bg-zinc-800 text-zinc-100 border-zinc-600'
+                  : 'bg-zinc-900/60 text-zinc-400 border-zinc-800 hover:text-zinc-200'
               }`}
             >
               <button
@@ -1330,13 +1373,16 @@ export default function App() {
                     setIsSubtitleMenuOpen(!isSubtitleMenuOpen)
                     setIsExportMenuOpen(false)
                   }}
-                  className="h-full px-1.5 border-l border-zinc-700/80 hover:bg-zinc-700/50 flex items-center gap-1 text-[10px] font-mono transition text-amber-300"
+                  className="h-full px-2.5 border-l border-zinc-700/80 hover:bg-zinc-700/50 flex items-center gap-1.5 text-xs font-sans font-medium transition text-amber-300"
                   title="Настроить субтитры: размер, стиль, положение"
                 >
-                  <span className="uppercase">
-                    {subtitlePreset === 'hormozi' ? 'Караоке' : subtitlePreset === 'box' ? 'Плашка' : 'Классик'} · {subtitleSize}px
+                  <span>
+                    {subtitlePreset === 'hormozi' ? 'Караоке' : subtitlePreset === 'box' ? 'Плашка' : 'Классик'}
                   </span>
-                  <ChevronDown className="w-3 h-3 text-zinc-400" />
+                  <span className="font-mono tabular-nums text-[11px] opacity-80">
+                    {subtitleSize}px
+                  </span>
+                  <ChevronDown className="w-3 h-3 text-zinc-400 shrink-0" />
                 </button>
               )}
             </div>
@@ -1352,26 +1398,26 @@ export default function App() {
             {/* Subtitle Quick Popover */}
             {isSubtitleMenuOpen && burnSubtitles && (
               <div
-                className="absolute right-0 top-8 w-72 bg-zinc-900 border border-zinc-800 rounded-lg shadow-2xl p-3 z-40 text-xs animate-in fade-in duration-100 space-y-3"
+                className="absolute right-0 top-full mt-1.5 w-80 bg-zinc-900 border border-zinc-700/80 rounded-xl shadow-2xl p-3.5 z-40 text-xs animate-in fade-in duration-100 space-y-3"
                 onClick={(e) => e.stopPropagation()}
               >
                 <div className="flex items-center justify-between pb-2 border-b border-zinc-800">
-                  <span className="font-semibold text-zinc-200 flex items-center gap-1.5">
+                  <span className="font-semibold text-zinc-100 flex items-center gap-2">
                     <Type className="w-3.5 h-3.5 text-amber-400" />
-                    Настройка субтитров
+                    Оформление субтитров
                   </span>
                   <button
                     onClick={() => setIsSubtitleMenuOpen(false)}
-                    className="w-5 h-5 rounded hover:bg-zinc-800 text-zinc-400 hover:text-white flex items-center justify-center transition"
+                    className="w-6 h-6 rounded-md hover:bg-zinc-800 text-zinc-400 hover:text-white flex items-center justify-center transition"
                   >
-                    <X className="w-3 h-3" />
+                    <X className="w-3.5 h-3.5" />
                   </button>
                 </div>
 
                 {/* Style */}
-                <div className="space-y-1">
+                <div className="space-y-1.5">
                   <label className="text-[11px] font-medium text-zinc-400">Стиль отображения</label>
-                  <div className="grid grid-cols-3 gap-1">
+                  <div className="grid grid-cols-3 gap-1.5">
                     {[
                       { id: 'hormozi' as const, title: 'Караоке' },
                       { id: 'classic' as const, title: 'Классик' },
@@ -1380,9 +1426,9 @@ export default function App() {
                       <button
                         key={st.id}
                         onClick={() => setSubtitlePreset(st.id)}
-                        className={`py-1 px-1.5 rounded border text-center transition font-medium text-[11px] ${
+                        className={`py-1.5 px-2 rounded-md border text-center transition font-medium text-xs ${
                           subtitlePreset === st.id
-                            ? 'bg-zinc-100 text-zinc-950 border-white'
+                            ? 'bg-zinc-100 text-zinc-950 border-white shadow-sm'
                             : 'bg-zinc-950/60 text-zinc-400 border-zinc-800 hover:text-zinc-200'
                         }`}
                       >
@@ -1396,10 +1442,10 @@ export default function App() {
                 <div className="space-y-1.5">
                   <div className="flex items-center justify-between">
                     <label className="text-[11px] font-medium text-zinc-400">Размер шрифта</label>
-                    <span className="font-mono text-[11px] text-amber-300 font-semibold">{subtitleSize} px</span>
+                    <span className="font-mono text-xs text-amber-300 font-semibold tabular-nums">{subtitleSize} px</span>
                   </div>
                   {/* Preset Pills */}
-                  <div className="grid grid-cols-4 gap-1">
+                  <div className="grid grid-cols-4 gap-1.5">
                     {[
                       { size: 42, label: '42', title: 'Компактный (42px)' },
                       { size: 54, label: '54', title: 'Стандарт (54px)' },
@@ -1410,9 +1456,9 @@ export default function App() {
                         key={sz.size}
                         onClick={() => setSubtitleSize(sz.size)}
                         title={sz.title}
-                        className={`py-1 px-1 rounded border text-center font-mono text-[11px] transition ${
+                        className={`py-1 rounded-md border text-center font-mono text-xs tabular-nums transition ${
                           subtitleSize === sz.size
-                            ? 'bg-amber-400 text-zinc-950 border-amber-300 font-bold'
+                            ? 'bg-amber-400 text-zinc-950 border-amber-300 font-bold shadow-sm'
                             : 'bg-zinc-950/60 text-zinc-400 border-zinc-800 hover:text-zinc-200'
                         }`}
                       >
@@ -1421,8 +1467,8 @@ export default function App() {
                     ))}
                   </div>
                   {/* Slider */}
-                  <div className="flex items-center gap-2 pt-0.5">
-                    <span className="text-[10px] text-zinc-500 font-mono">36</span>
+                  <div className="flex items-center gap-2 pt-1">
+                    <span className="text-[10px] text-zinc-500 font-mono tabular-nums">36</span>
                     <input
                       type="range"
                       min={36}
@@ -1432,14 +1478,14 @@ export default function App() {
                       onChange={(e) => setSubtitleSize(Number(e.target.value))}
                       className="flex-1 h-1.5 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-amber-400"
                     />
-                    <span className="text-[10px] text-zinc-500 font-mono">90</span>
+                    <span className="text-[10px] text-zinc-500 font-mono tabular-nums">90</span>
                   </div>
                 </div>
 
                 {/* Vertical Position */}
-                <div className="space-y-1">
-                  <label className="text-[11px] font-medium text-zinc-400">Положение на экране</label>
-                  <div className="grid grid-cols-3 gap-1">
+                <div className="space-y-1.5">
+                  <label className="text-[11px] font-medium text-zinc-400">Положение в кадре</label>
+                  <div className="grid grid-cols-3 gap-1.5">
                     {[
                       { id: 'bottom' as const, label: 'Снизу' },
                       { id: 'center' as const, label: 'По центру' },
@@ -1448,9 +1494,9 @@ export default function App() {
                       <button
                         key={pos.id}
                         onClick={() => setSubtitlePosition(pos.id)}
-                        className={`py-1 px-1.5 rounded border text-center transition font-medium text-[11px] ${
+                        className={`py-1.5 px-2 rounded-md border text-center transition font-medium text-xs ${
                           subtitlePosition === pos.id
-                            ? 'bg-zinc-100 text-zinc-950 border-white'
+                            ? 'bg-zinc-100 text-zinc-950 border-white shadow-sm'
                             : 'bg-zinc-950/60 text-zinc-400 border-zinc-800 hover:text-zinc-200'
                         }`}
                       >
@@ -1472,17 +1518,17 @@ export default function App() {
                 setIsSettingsOpen(true)
               }
             }}
-            className={`h-7 px-2.5 rounded text-xs font-medium border flex items-center gap-1.5 transition ${
+            className={`h-8 px-3 rounded-md text-xs font-medium border flex items-center gap-2 transition shadow-sm ${
               bgMusicPath
-                ? 'bg-indigo-950/70 text-indigo-300 border-indigo-700/80 hover:bg-indigo-900/60'
-                : 'bg-zinc-800/50 hover:bg-zinc-800 text-zinc-300 border-zinc-700/60'
+                ? 'bg-indigo-950/70 text-indigo-200 border-indigo-700/80 hover:bg-indigo-900/60'
+                : 'bg-zinc-800/80 hover:bg-zinc-800 text-zinc-300 hover:text-white border-zinc-700/70'
             }`}
             title={bgMusicPath ? `Фоновая музыка: ${bgMusicName} (${Math.round(bgMusicVolume * 100)}%)` : 'Выбрать фоновую музыку'}
           >
             <Music className={`w-3.5 h-3.5 ${bgMusicPath ? 'text-indigo-400' : 'text-zinc-400'}`} />
             <span className="hidden md:inline">Музыка</span>
             {bgMusicPath && (
-              <span className="text-[10px] font-mono px-1 py-0.2 rounded bg-indigo-900/80 text-indigo-200">
+              <span className="text-[10px] font-mono tabular-nums px-1.5 py-0.5 rounded bg-indigo-900/80 text-indigo-200 font-semibold">
                 {Math.round(bgMusicVolume * 100)}%
               </span>
             )}
@@ -1495,23 +1541,23 @@ export default function App() {
               setIsSubtitleMenuOpen(false)
               setIsExportMenuOpen(false)
             }}
-            className={`h-7 px-2.5 rounded text-xs font-medium border flex items-center gap-1.5 transition ${
+            className={`h-8 px-3 rounded-md text-xs font-medium border flex items-center gap-2 transition shadow-sm ${
               isSettingsOpen
                 ? 'bg-zinc-700 text-white border-zinc-500'
-                : 'bg-zinc-800/50 hover:bg-zinc-800 text-zinc-300 border-zinc-700/60'
+                : 'bg-zinc-800/80 hover:bg-zinc-800 text-zinc-300 hover:text-white border-zinc-700/70'
             }`}
-            title="Настройки монтажа и субтитров"
+            title="Параметры монтажа и субтитров"
           >
             <SlidersHorizontal className="w-3.5 h-3.5 text-zinc-400" />
-            <span className="hidden md:inline">Настройки</span>
+            <span className="hidden md:inline">Параметры</span>
           </button>
 
-          <div className="h-3.5 w-px bg-zinc-800" />
+          <div className="h-4 w-px bg-zinc-800" />
 
           {/* Pause Visibility Toggle */}
           <button
             onClick={() => setShowPauses(!showPauses)}
-            className="h-7 px-2.5 rounded text-xs font-medium bg-zinc-800/50 hover:bg-zinc-800 border border-zinc-700/60 text-zinc-300 flex items-center gap-1.5 transition"
+            className="h-8 px-3 rounded-md text-xs font-medium bg-zinc-800/80 hover:bg-zinc-800 border border-zinc-700/70 text-zinc-300 hover:text-white flex items-center gap-2 transition shadow-sm"
             title="Показать или скрыть паузы в тексте"
           >
             {showPauses ? <Eye className="w-3.5 h-3.5 text-zinc-400" /> : <EyeOff className="w-3.5 h-3.5 text-zinc-500" />}
@@ -1522,18 +1568,18 @@ export default function App() {
           {activeCuts.length === silences.length && silences.length > 0 ? (
             <button
               onClick={handleRestoreAll}
-              className="h-7 px-2.5 rounded text-xs font-medium bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-zinc-300 flex items-center gap-1.5 transition"
+              className="h-8 px-3 rounded-md text-xs font-medium bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-zinc-200 flex items-center gap-2 transition shadow-sm"
             >
-              <RotateCcw className="w-3 h-3 text-zinc-400" />
+              <RotateCcw className="w-3.5 h-3.5 text-zinc-400" />
               <span>Восстановить</span>
             </button>
           ) : (
             <button
               onClick={handleCutAll}
-              className="h-7 px-2.5 rounded text-xs font-medium bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-red-300 hover:text-red-200 flex items-center gap-1.5 transition"
+              className="h-8 px-3 rounded-md text-xs font-medium bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-red-300 hover:text-red-200 flex items-center gap-2 transition shadow-sm"
             >
-              <Scissors className="w-3 h-3 text-red-400" />
-              <span>Вырезать все</span>
+              <Scissors className="w-3.5 h-3.5 text-red-400" />
+              <span>Вырезать всё</span>
             </button>
           )}
 
@@ -1553,7 +1599,7 @@ export default function App() {
               setIsCoverModalOpen(true)
             }}
             disabled={!filePath || isAnalyzing}
-            className="h-7 px-2.5 rounded text-xs font-medium bg-zinc-800/60 hover:bg-zinc-800 border border-zinc-700/60 text-zinc-300 hover:text-white flex items-center gap-1.5 transition disabled:opacity-40"
+            className="h-8 px-3 rounded-md text-xs font-medium bg-zinc-800/80 hover:bg-zinc-800 border border-zinc-700/70 text-zinc-300 hover:text-white flex items-center gap-2 transition disabled:opacity-40 shadow-sm"
             title="Генератор обложки для Reels и Shorts"
           >
             <ImageIcon className="w-3.5 h-3.5 text-indigo-400" />
@@ -1575,80 +1621,81 @@ export default function App() {
                 setIsSubtitleMenuOpen(false)
               }}
               disabled={isExporting || isAnalyzing}
-              className="h-7 px-3 rounded text-xs font-semibold bg-zinc-100 hover:bg-white text-zinc-950 flex items-center gap-1.5 transition shadow-sm disabled:opacity-50"
+              className="h-8 px-3.5 rounded-md text-xs font-semibold bg-zinc-100 hover:bg-white text-zinc-950 flex items-center gap-2 transition shadow-md disabled:opacity-50"
             >
               <Download className="w-3.5 h-3.5" />
               <span>{isExporting ? 'Экспорт...' : 'Экспорт'}</span>
+              <ChevronDown className="w-3 h-3 text-zinc-700 -mr-0.5" />
             </button>
 
             {/* Export Menu Dropdown */}
             {isExportMenuOpen && (
-              <div className="absolute right-0 top-8 w-64 bg-zinc-900 border border-zinc-800 rounded-lg shadow-2xl py-1.5 z-40 text-xs animate-in fade-in duration-100">
+              <div className="absolute right-0 top-full mt-1.5 w-72 bg-zinc-900 border border-zinc-700/80 rounded-xl shadow-2xl py-2 z-40 text-xs animate-in fade-in duration-100">
                 <button
                   onClick={handleExportReels}
-                  className="w-full px-3 py-2 text-left hover:bg-zinc-800/80 flex items-center gap-2.5 text-zinc-200 transition"
+                  className="w-full px-3.5 py-2.5 text-left hover:bg-zinc-800/80 flex items-center gap-3 text-zinc-200 transition"
                 >
                   <Sparkles className="w-4 h-4 text-pink-400 flex-shrink-0" />
                   <div>
-                    <div className="font-medium text-white">Reels & Shorts (1080×1920)</div>
-                    <div className="text-[10px] text-zinc-400">9:16 с размытием фона и субтитрами</div>
+                    <div className="font-semibold text-white">Reels и Shorts (1080×1920)</div>
+                    <div className="text-[11px] text-zinc-400">9:16 с размытием фона и субтитрами</div>
                   </div>
                 </button>
 
                 <button
                   onClick={handleExportTelegram}
-                  className="w-full px-3 py-2 text-left hover:bg-zinc-800/80 flex items-center gap-2.5 text-zinc-200 transition"
+                  className="w-full px-3.5 py-2.5 text-left hover:bg-zinc-800/80 flex items-center gap-3 text-zinc-200 transition"
                 >
                   <Send className="w-4 h-4 text-sky-400 flex-shrink-0" />
                   <div>
-                    <div className="font-medium text-white">Telegram (&lt; 50 МБ)</div>
-                    <div className="text-[10px] text-zinc-400">Сжатие до 48 МБ без потерь</div>
+                    <div className="font-semibold text-white">Telegram (&lt; 50 МБ)</div>
+                    <div className="text-[11px] text-zinc-400">Сжатие до 48 МБ без потери качества</div>
                   </div>
                 </button>
 
                 <button
                   onClick={handleExportAudioOnly}
-                  className="w-full px-3 py-2 text-left hover:bg-zinc-800/80 flex items-center gap-2.5 text-zinc-200 transition"
+                  className="w-full px-3.5 py-2.5 text-left hover:bg-zinc-800/80 flex items-center gap-3 text-zinc-200 transition"
                 >
                   <Music className="w-4 h-4 text-emerald-400 flex-shrink-0" />
                   <div>
-                    <div className="font-medium text-white">Чистый звук (MP3 320k)</div>
-                    <div className="text-[10px] text-zinc-400">Голос без пауз в высоком качестве</div>
+                    <div className="font-semibold text-white">Аудиодорожка (MP3 320 кбит/с)</div>
+                    <div className="text-[11px] text-zinc-400">Экспорт сведённого звука без пауз</div>
                   </div>
                 </button>
 
                 <button
                   onClick={handleExportMP4}
-                  className="w-full px-3 py-2 text-left hover:bg-zinc-800/80 flex items-center gap-2.5 text-zinc-200 transition"
+                  className="w-full px-3.5 py-2.5 text-left hover:bg-zinc-800/80 flex items-center gap-3 text-zinc-200 transition"
                 >
                   <Zap className="w-4 h-4 text-amber-400 flex-shrink-0" />
                   <div>
-                    <div className="font-medium text-zinc-200">Обычный MP4</div>
-                    <div className="text-[10px] text-zinc-400">Текущие настройки монтажа</div>
+                    <div className="font-semibold text-zinc-200">Мастер-видео (MP4)</div>
+                    <div className="text-[11px] text-zinc-400">Экспорт с текущими параметрами</div>
                   </div>
                 </button>
 
-                <div className="h-px bg-zinc-800 my-1" />
+                <div className="h-px bg-zinc-800 my-1.5" />
 
                 <button
                   onClick={handleExportSRT}
-                  className="w-full px-3 py-2 text-left hover:bg-zinc-800/80 flex items-center gap-2.5 text-zinc-200 transition"
+                  className="w-full px-3.5 py-2 text-left hover:bg-zinc-800/80 flex items-center gap-3 text-zinc-200 transition"
                 >
                   <FileText className="w-4 h-4 text-zinc-400 flex-shrink-0" />
                   <div>
                     <div className="font-medium">Субтитры SRT</div>
-                    <div className="text-[10px] text-zinc-400">Таймкоды для внешних плееров</div>
+                    <div className="text-[11px] text-zinc-400">Файл таймкодов для внешних плееров</div>
                   </div>
                 </button>
 
                 <button
                   onClick={handleExportEDL}
-                  className="w-full px-3 py-2 text-left hover:bg-zinc-800/80 flex items-center gap-2.5 text-zinc-200 transition"
+                  className="w-full px-3.5 py-2 text-left hover:bg-zinc-800/80 flex items-center gap-3 text-zinc-200 transition"
                 >
                   <Clapperboard className="w-4 h-4 text-zinc-400 flex-shrink-0" />
                   <div>
                     <div className="font-medium">Таймлайн EDL</div>
-                    <div className="text-[10px] text-zinc-400">Premiere Pro и DaVinci Resolve</div>
+                    <div className="text-[11px] text-zinc-400">Импорт в Premiere Pro и DaVinci Resolve</div>
                   </div>
                 </button>
               </div>
@@ -1668,54 +1715,54 @@ export default function App() {
       >
         
         {/* LEFT PANE: Video Player */}
-        <section className="w-[50%] lg:w-[48%] border-r border-zinc-800/80 bg-zinc-950 flex flex-col justify-between p-4">
+        <section className="w-[50%] lg:w-[48%] border-r border-zinc-800 bg-zinc-950 flex flex-col justify-between p-4 flex-shrink-0">
           
           {/* Top Player Toolbar: Framing Mode & Visual Color Preset */}
-          <div className="flex items-center justify-between mb-2 px-1 text-xs flex-shrink-0">
+          <div className="flex items-center justify-between mb-2.5 px-0.5 text-xs flex-shrink-0">
             {/* Framing mode toggle */}
-            <div className="flex items-center gap-1 bg-zinc-900/80 p-0.5 rounded-md border border-zinc-800">
+            <div className="flex items-center p-0.5 rounded-lg bg-zinc-900/90 border border-zinc-800 shadow-sm">
               <button
                 onClick={() => setFramingMode('original')}
-                className={`px-2 py-0.5 rounded text-[11px] font-medium transition flex items-center gap-1 ${
+                className={`h-7 px-2.5 rounded-md text-xs font-medium transition flex items-center gap-1.5 ${
                   framingMode === 'original'
                     ? 'bg-zinc-800 text-zinc-100 shadow-sm'
-                    : 'text-zinc-500 hover:text-zinc-300'
+                    : 'text-zinc-400 hover:text-zinc-200'
                 }`}
                 title="Оригинальный формат кадра"
               >
-                <Monitor className="w-3 h-3" />
+                <Monitor className="w-3.5 h-3.5" />
                 <span>Оригинал</span>
               </button>
               <button
                 onClick={() => setFramingMode('blur_9_16')}
-                className={`px-2 py-0.5 rounded text-[11px] font-medium transition flex items-center gap-1 ${
+                className={`h-7 px-2.5 rounded-md text-xs font-medium transition flex items-center gap-1.5 ${
                   framingMode === 'blur_9_16'
-                    ? 'bg-indigo-950/80 text-indigo-300 border border-indigo-800/60 shadow-sm'
-                    : 'text-zinc-500 hover:text-zinc-300'
+                    ? 'bg-indigo-950/80 text-indigo-200 border border-indigo-700/70 shadow-sm'
+                    : 'text-zinc-400 hover:text-zinc-200'
                 }`}
                 title="9:16 с размытием фона для Reels/Shorts"
               >
-                <Smartphone className="w-3 h-3" />
+                <Smartphone className="w-3.5 h-3.5" />
                 <span>9:16 размытие</span>
               </button>
             </div>
 
             {/* Visual Color Presets */}
-            <div className="flex items-center gap-1 bg-zinc-900/80 p-0.5 rounded-md border border-zinc-800">
-              <Palette className="w-3 h-3 text-zinc-500 ml-1.5 mr-0.5" />
+            <div className="flex items-center p-0.5 rounded-lg bg-zinc-900/90 border border-zinc-800 shadow-sm">
+              <Palette className="w-3.5 h-3.5 text-zinc-400 ml-2 mr-1" />
               {[
                 { id: 'none' as const, label: 'Ориг' },
                 { id: 'anime_punch' as const, label: 'Anime' },
                 { id: 'cinematic' as const, label: 'Кино' },
-                { id: 'crisp' as const, label: 'Чёткость' },
+                { id: 'crisp' as const, label: 'Чётко' },
               ].map((cp) => (
                 <button
                   key={cp.id}
                   onClick={() => setColorPreset(cp.id)}
-                  className={`px-1.5 py-0.5 rounded text-[10px] font-medium transition ${
+                  className={`h-7 px-2 rounded-md text-xs font-medium transition ${
                     colorPreset === cp.id
-                      ? 'bg-zinc-800 text-zinc-100 font-semibold'
-                      : 'text-zinc-500 hover:text-zinc-300'
+                      ? 'bg-zinc-800 text-zinc-100 font-semibold shadow-sm'
+                      : 'text-zinc-400 hover:text-zinc-200'
                   }`}
                 >
                   {cp.label}
@@ -1726,7 +1773,7 @@ export default function App() {
 
           {/* Framed Video Container */}
           <div className="relative flex-1 flex items-center justify-center min-h-0">
-            <div className={`relative ${framingMode === 'blur_9_16' ? 'aspect-[9/16]' : 'max-w-full'} h-full max-h-[520px] bg-black rounded-lg border border-zinc-800/80 overflow-hidden shadow-2xl flex items-center justify-center select-none`}>
+            <div className={`relative ${framingMode === 'blur_9_16' ? 'aspect-[9/16]' : 'max-w-full'} h-full max-h-[520px] bg-black rounded-xl border border-zinc-800 shadow-2xl flex items-center justify-center select-none overflow-hidden`}>
               
               {videoSrc ? (
                 <>
@@ -1807,13 +1854,13 @@ export default function App() {
 
                   {/* Background Music Status Badge */}
                   {bgMusicPath && (
-                    <div className="absolute top-2.5 left-2.5 z-20 flex items-center gap-1.5 px-2 py-1 rounded-md bg-black/75 backdrop-blur-md border border-zinc-700/60 text-[10px] font-mono text-zinc-200 shadow-md pointer-events-none">
-                      <Music className={`w-3 h-3 ${isPlaying ? 'text-indigo-400 animate-pulse' : 'text-zinc-400'}`} />
+                    <div className="absolute top-3 left-3 z-20 flex items-center gap-2 px-2.5 py-1 rounded-md bg-black/75 backdrop-blur-md border border-zinc-700/70 text-xs font-mono tabular-nums text-zinc-200 shadow-md pointer-events-none">
+                      <Music className={`w-3.5 h-3.5 ${isPlaying ? 'text-indigo-400 animate-pulse' : 'text-zinc-400'}`} />
                       <span className="max-w-[120px] truncate">{bgMusicName}</span>
-                      <span className="text-zinc-500">•</span>
+                      <span className="text-zinc-600">•</span>
                       <span className="text-indigo-300 font-semibold">{Math.round(bgMusicVolume * 100)}%</span>
                       {autoDucking && activePhrase && (
-                        <span className="px-1 py-0.2 rounded bg-amber-500/20 text-amber-300 text-[9px] font-sans font-medium uppercase tracking-wider">
+                        <span className="px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 text-[10px] font-sans font-medium uppercase tracking-wider">
                           Ducked
                         </span>
                       )}
@@ -1853,7 +1900,7 @@ export default function App() {
                   <div
                     className={`absolute inset-x-0 ${
                       subtitlePosition === 'top'
-                        ? 'top-11'
+                        ? 'top-8'
                         : subtitlePosition === 'center'
                         ? 'top-1/2 -translate-y-1/2'
                         : 'bottom-8'
@@ -1861,8 +1908,8 @@ export default function App() {
                   >
                     {subtitlePreset === 'hormozi' ? (
                       <div
-                        className="inline-block px-3 py-1.5 rounded bg-black/85 border border-black/60 shadow-2xl drop-shadow-[0_4px_10px_rgba(0,0,0,0.95)] max-w-[92%]"
-                        style={{ fontSize: `${Math.max(12, Math.round(subtitleSize * 0.32))}px`, lineHeight: 1.25 }}
+                        className="inline-block px-4 py-2 rounded-xl bg-black/85 backdrop-blur-sm border border-black/70 shadow-2xl max-w-[85%] text-balance"
+                        style={{ fontSize: `${Math.max(13, Math.round(subtitleSize * 0.32))}px`, lineHeight: 1.3 }}
                       >
                         {phraseData.words && phraseData.words.length > 0 ? (
                           phraseData.words.map((w, wIdx) => {
@@ -1874,9 +1921,9 @@ export default function App() {
                             return (
                               <span
                                 key={wIdx}
-                                className={`inline-block px-1 font-black tracking-wide uppercase transition-all duration-75 ${
+                                className={`inline-block mx-0.5 px-1 font-black tracking-wide uppercase transition-colors duration-75 ${
                                   isWordActive
-                                    ? 'text-amber-300 scale-110 drop-shadow-[0_0_8px_rgba(252,211,77,0.8)]'
+                                    ? 'text-amber-300 scale-105 drop-shadow-[0_0_8px_rgba(252,211,77,0.85)]'
                                     : 'text-white'
                                 }`}
                               >
@@ -1891,31 +1938,31 @@ export default function App() {
                         )}
                       </div>
                     ) : subtitlePreset === 'box' ? (
-                      <span
-                        className="inline-block px-3.5 py-1.5 rounded-md bg-black/85 backdrop-blur-sm text-zinc-100 font-semibold border border-zinc-700/80 shadow-lg max-w-[92%]"
-                        style={{ fontSize: `${Math.max(11, Math.round(subtitleSize * 0.28))}px`, lineHeight: 1.25 }}
+                      <div
+                        className="inline-block px-4 py-2 rounded-xl bg-black/80 backdrop-blur-sm text-zinc-100 font-semibold border border-zinc-700/80 shadow-2xl max-w-[85%] text-balance"
+                        style={{ fontSize: `${Math.max(13, Math.round(subtitleSize * 0.32))}px`, lineHeight: 1.3 }}
                       >
                         {phraseData.text}
-                      </span>
+                      </div>
                     ) : (
-                      <span
-                        className="inline-block px-3 py-1.5 text-white font-bold leading-tight drop-shadow-[0_2px_4px_rgba(0,0,0,0.95)] max-w-[92%]"
+                      <div
+                        className="inline-block px-4 py-1.5 text-white font-bold max-w-[85%] text-balance"
                         style={{
-                          fontSize: `${Math.max(12, Math.round(subtitleSize * 0.32))}px`,
-                          lineHeight: 1.25,
-                          textShadow: '0 2px 4px rgba(0,0,0,0.95), 0 0 2px rgba(0,0,0,0.9)',
+                          fontSize: `${Math.max(13, Math.round(subtitleSize * 0.32))}px`,
+                          lineHeight: 1.3,
+                          textShadow: '0 2px 4px rgba(0,0,0,0.95), 0 0 4px rgba(0,0,0,0.9), 0 0 2px rgba(0,0,0,1)',
                         }}
                       >
                         {phraseData.text}
-                      </span>
+                      </div>
                     )}
                   </div>
                 )
               })()}
 
               {/* Timecode badge */}
-              <div className="absolute top-2.5 right-2.5 pointer-events-none z-10">
-                <span className="text-[10px] font-mono font-medium px-1.5 py-0.5 rounded bg-black/70 text-zinc-400 backdrop-blur-sm">
+              <div className="absolute top-3 right-3 pointer-events-none z-10">
+                <span className="text-xs font-mono tabular-nums font-medium px-2.5 py-1 rounded-md bg-black/75 text-zinc-200 backdrop-blur-md border border-zinc-700/70 shadow-md">
                   {formatTime(currentTime)}
                 </span>
               </div>
@@ -1923,38 +1970,52 @@ export default function App() {
           </div>
 
           {/* Transport Bar */}
-          <div className="flex items-center justify-between pt-3 mt-2 border-t border-zinc-900 text-xs">
-            <div className="flex items-center gap-1.5">
+          <div className="flex items-center justify-between pt-3 mt-2.5 border-t border-zinc-900 text-xs flex-shrink-0">
+            <div className="flex items-center gap-2">
               <button
                 onClick={() => seekTo(0)}
-                className="w-7 h-7 rounded hover:bg-zinc-900 text-zinc-400 hover:text-zinc-200 flex items-center justify-center transition"
+                className="w-8 h-8 rounded-md bg-zinc-900/80 hover:bg-zinc-800 border border-zinc-800 text-zinc-400 hover:text-zinc-200 flex items-center justify-center transition shadow-sm"
                 title="В начало"
               >
-                <SkipBack className="w-3.5 h-3.5" />
+                <SkipBack className="w-4 h-4" />
+              </button>
+              <button
+                onClick={() => seekTo(currentTime - 2)}
+                className="h-8 px-2.5 rounded-md bg-zinc-900/80 hover:bg-zinc-800 border border-zinc-800 text-zinc-400 hover:text-zinc-200 flex items-center gap-1 font-mono text-xs tabular-nums transition shadow-sm"
+                title="Назад на 2 секунды"
+              >
+                <span>-2с</span>
               </button>
               <button
                 onClick={togglePlay}
-                className="h-7 px-3 rounded bg-zinc-100 hover:bg-white text-zinc-950 font-medium flex items-center gap-1.5 transition shadow-sm"
+                className="h-8 w-24 rounded-md bg-zinc-100 hover:bg-white text-zinc-950 font-semibold flex items-center justify-center gap-2 transition shadow-sm"
               >
-                {isPlaying ? <Pause className="w-3.5 h-3.5 fill-current" /> : <Play className="w-3.5 h-3.5 fill-current" />}
+                {isPlaying ? <Pause className="w-4 h-4 fill-current" /> : <Play className="w-4 h-4 fill-current" />}
                 <span className="text-xs">{isPlaying ? 'Пауза' : 'Старт'}</span>
               </button>
               <button
-                onClick={() => seekTo(currentTime + 5)}
-                className="w-7 h-7 rounded hover:bg-zinc-900 text-zinc-400 hover:text-zinc-200 flex items-center justify-center transition"
-                title="Вперёд на 5 с"
+                onClick={() => seekTo(currentTime + 2)}
+                className="h-8 px-2.5 rounded-md bg-zinc-900/80 hover:bg-zinc-800 border border-zinc-800 text-zinc-400 hover:text-zinc-200 flex items-center gap-1 font-mono text-xs tabular-nums transition shadow-sm"
+                title="Вперёд на 2 секунды"
               >
-                <SkipForward className="w-3.5 h-3.5" />
+                <span>+2с</span>
+              </button>
+              <button
+                onClick={() => seekTo(totalDuration)}
+                className="w-8 h-8 rounded-md bg-zinc-900/80 hover:bg-zinc-800 border border-zinc-800 text-zinc-400 hover:text-zinc-200 flex items-center justify-center transition shadow-sm"
+                title="В конец"
+              >
+                <SkipForward className="w-4 h-4" />
               </button>
             </div>
 
-            <div className="flex items-center gap-3 font-mono text-[11px]">
+            <div className="flex items-center gap-2.5 font-mono tabular-nums text-xs">
               <span className="text-zinc-400">
-                <strong className="text-zinc-200 font-normal">{formatTime(currentTime)}</strong> / {formatTime(totalDuration)}
+                <strong className="text-zinc-200 font-semibold">{formatTime(currentTime)}</strong> / {formatTime(totalDuration)}
               </span>
-              <span className="text-zinc-600">|</span>
+              <span className="text-zinc-600">•</span>
               <span className="text-zinc-400">
-                Итог: <strong className="text-emerald-400 font-normal">{formatTime(remainingDuration)}</strong>
+                Итог: <strong className="text-emerald-400 font-semibold">{formatTime(remainingDuration)}</strong>
               </span>
             </div>
           </div>
@@ -1962,96 +2023,173 @@ export default function App() {
         </section>
 
         {/* RIGHT PANE: Script & Text */}
-        <section className="flex-1 bg-zinc-900/40 flex flex-col justify-between overflow-hidden">
+        <section className="flex-1 bg-zinc-900/40 flex flex-col overflow-hidden">
           
           {/* Header & Search */}
-          <div className="h-10 px-4 border-b border-zinc-800/80 bg-zinc-900/60 flex items-center justify-between flex-shrink-0">
-            <div className="flex items-center gap-2">
-              <span className="text-xs font-semibold text-zinc-300 uppercase tracking-wider">
-                Текст и паузы
+          <div className="h-12 px-4 border-b border-zinc-800 bg-zinc-900/80 backdrop-blur flex items-center justify-between flex-shrink-0">
+            <div className="flex items-center gap-2.5">
+              <FileText className="w-4 h-4 text-zinc-400" />
+              <span className="text-xs font-semibold text-zinc-200 uppercase tracking-wider">
+                Скрипт и редакция текста
+              </span>
+              <span className="text-xs font-mono tabular-nums px-2.5 py-0.5 rounded-full bg-zinc-800/80 text-zinc-400 border border-zinc-700/60">
+                {phraseList.length} фраз • {silences.length} пауз
               </span>
             </div>
             
-            <div className="relative w-48">
-              <Search className="w-3 h-3 absolute left-2 top-2 text-zinc-500" />
+            <div className="relative w-56">
+              <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-zinc-500 pointer-events-none" />
               <input
                 type="text"
                 placeholder="Поиск по тексту..."
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                className="w-full h-7 pl-6 pr-2 rounded bg-zinc-950/80 border border-zinc-800 text-[11px] text-zinc-200 placeholder-zinc-500 focus:outline-none focus:border-zinc-700"
+                className="w-full h-8 pl-8 pr-7 rounded-md bg-zinc-950/80 border border-zinc-800 text-xs text-zinc-200 placeholder-zinc-500 focus:outline-none focus:border-zinc-600 transition"
               />
+              {searchQuery && (
+                <button
+                  onClick={() => setSearchQuery('')}
+                  className="w-4 h-4 absolute right-2 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-zinc-300 flex items-center justify-center"
+                >
+                  <X className="w-3 h-3" />
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* Subheader Status Bar (Fixed outside of scroll area) */}
+          <div className="h-8 px-4 border-b border-zinc-800/60 bg-zinc-900/50 flex items-center justify-between text-xs font-sans text-zinc-400 flex-shrink-0">
+            <div className="flex items-center gap-1.5 text-zinc-400">
+              <Zap className="w-3.5 h-3.5 text-zinc-500 shrink-0" />
+              <span>Клик по таймкоду — переход, по паузе — переключение вырезки</span>
+            </div>
+            <div className="flex items-center gap-1.5 text-xs font-mono tabular-nums text-zinc-400">
+              <span>Whisper: <strong className="text-zinc-200 font-medium">{whisperModel}</strong></span>
+              <span className="text-zinc-600">•</span>
+              <span><strong className="text-zinc-200 font-medium">{speechLanguage.toUpperCase()}</strong></span>
             </div>
           </div>
 
           {/* Script Body */}
-          <div className="flex-1 overflow-y-auto p-5 space-y-4">
-            
-            <div className="text-xs text-zinc-500 font-mono mb-2 flex items-center justify-between">
-              <span>Клик по таймкоду — переход, по паузе — вырезать или оставить.</span>
-              <span className="text-[11px] text-zinc-400 font-medium">Whisper: {whisperModel} · {speechLanguage.toUpperCase()}</span>
-            </div>
+          <div className="flex-1 overflow-y-auto p-4 md:p-5 space-y-3">
 
-            {items.map((item) => {
-              if (item.type === 'phrase') {
-                const isActive = activePhrase?.data.id === item.data.id
-                const matchesSearch = searchQuery.trim() === '' || item.data.text.toLowerCase().includes(searchQuery.toLowerCase())
-                if (!matchesSearch) return null
+            {(() => {
+              const isSearching = searchQuery.trim() !== ''
+              const matchingPhrases = phraseList.filter((p) =>
+                p.data.text.toLowerCase().includes(searchQuery.toLowerCase().trim())
+              )
 
+              if (isSearching && matchingPhrases.length === 0) {
                 return (
-                  <div
-                    key={item.data.id}
-                    className={`group transition-all rounded p-2 -mx-2 ${
-                      isActive ? 'bg-zinc-800/40 ring-1 ring-zinc-700' : 'hover:bg-zinc-900/40'
-                    }`}
-                  >
-                    {/* Timecode badge */}
-                    <div className="flex items-center gap-2 text-[10px] font-mono text-zinc-500 mb-1">
-                      <span
-                        onClick={() => seekTo(item.data.startTime)}
-                        className="cursor-pointer hover:text-zinc-300 hover:underline"
-                      >
-                        {formatTime(item.data.startTime)} — {formatTime(item.data.endTime)}
-                      </span>
-                    </div>
-
-                    {/* Clean Editable Text Paragraph */}
-                    <textarea
-                      rows={2}
-                      value={item.data.text}
-                      onChange={(e) => handleTextChange(item.data.id, e.target.value)}
-                      className="w-full bg-transparent text-sm leading-relaxed text-zinc-200 font-sans resize-none focus:outline-none focus:bg-zinc-950 focus:p-1.5 focus:rounded border border-transparent focus:border-zinc-700 transition-all"
-                    />
+                  <div className="flex flex-col items-center justify-center p-10 text-center text-zinc-500 select-none">
+                    <Search className="w-8 h-8 mb-2.5 text-zinc-600" />
+                    <div className="text-sm font-medium text-zinc-400">Ничего не найдено</div>
+                    <div className="text-xs text-zinc-500 mt-1">По запросу «{searchQuery}» фразы отсутствуют</div>
                   </div>
                 )
               }
 
-              // Silence Item
-              if (item.type === 'silence') {
-                if (!showPauses && item.data.isCut) return null
+              return items.map((item) => {
+                if (item.type === 'phrase') {
+                  const isActive = activePhrase?.data.id === item.data.id
+                  const matchesSearch = !isSearching || item.data.text.toLowerCase().includes(searchQuery.toLowerCase().trim())
+                  if (!matchesSearch) return null
 
-                return (
-                  <div key={item.data.id} className="py-1 flex items-center gap-2">
-                    <span
-                      onClick={() => toggleSilenceCut(item.data.id)}
-                      className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-mono cursor-pointer transition select-none ${
-                        item.data.isCut
-                          ? 'bg-zinc-900 text-zinc-500 line-through border border-zinc-800 hover:bg-zinc-850'
-                          : 'bg-red-950/40 text-red-300 border border-red-900/60 hover:bg-red-900/40'
+                  return (
+                    <div
+                      key={item.data.id}
+                      className={`group transition-all rounded-xl p-3 border ${
+                        isActive
+                          ? 'bg-zinc-900/90 border-amber-500/40 shadow-lg shadow-amber-950/20 ring-1 ring-amber-500/20'
+                          : 'bg-zinc-900/40 border-zinc-800/80 hover:bg-zinc-900/70 hover:border-zinc-700/80'
                       }`}
-                      title="Кликните, чтобы вырезать или оставить паузу"
                     >
-                      <span>Пауза {item.data.duration.toFixed(1)} с</span>
-                      <span className="text-[10px] font-sans font-medium px-1 rounded bg-black/40">
-                        {item.data.isCut ? 'вырезана' : 'вырезать'}
-                      </span>
-                    </span>
-                  </div>
-                )
-              }
+                      {/* Header: Speaker Tag, Timecode Jump, Duration, Active Badge */}
+                      <div className="flex items-center justify-between text-xs mb-2 select-none">
+                        <div className="flex items-center gap-2">
+                          <div className="inline-flex items-center gap-1.5 px-2.5 h-6 rounded-full bg-zinc-800/90 border border-zinc-700/60 text-xs font-sans font-medium text-zinc-200 shadow-sm">
+                            <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 shrink-0" />
+                            <span>{item.data.speaker || 'Спикер'}</span>
+                          </div>
 
-              return null
-            })}
+                          <button
+                            type="button"
+                            onClick={() => seekTo(item.data.startTime)}
+                            className="inline-flex items-center gap-1.5 px-2 h-6 rounded-md bg-zinc-800/50 hover:bg-zinc-800 border border-zinc-700/50 hover:border-zinc-600 text-xs font-mono tabular-nums text-zinc-300 hover:text-white transition shadow-sm"
+                            title="Перейти к началу фразы"
+                          >
+                            <Play className="w-2.5 h-2.5 fill-current text-indigo-400 shrink-0" />
+                            <span>{formatTime(item.data.startTime)} – {formatTime(item.data.endTime)}</span>
+                          </button>
+
+                          <span className="text-xs font-mono tabular-nums text-zinc-400">
+                            ({(item.data.endTime - item.data.startTime).toFixed(1)} с)
+                          </span>
+                        </div>
+
+                        {isActive && (
+                          <div className="inline-flex items-center gap-1.5 px-2.5 h-6 rounded-full bg-amber-400/10 border border-amber-400/30 text-amber-300 text-xs font-sans font-medium shadow-sm">
+                            <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse shrink-0" />
+                            <span>В эфире</span>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Clean Auto-Resizing Editable Text */}
+                      <AutoResizeTextarea
+                        value={item.data.text}
+                        onChange={(newText) => handleTextChange(item.data.id, newText)}
+                        className="w-full bg-zinc-950/40 hover:bg-zinc-950/60 focus:bg-zinc-950 px-3 py-2 rounded-lg border border-transparent hover:border-zinc-800/80 focus:border-zinc-700 text-sm md:text-base leading-relaxed text-zinc-100 font-sans resize-none focus:outline-none transition-colors selection:bg-zinc-800 overflow-hidden"
+                        placeholder="Введите текст субтитров..."
+                      />
+                    </div>
+                  )
+                }
+
+                if (item.type === 'silence') {
+                  if (isSearching) return null
+                  if (!showPauses && item.data.isCut) return null
+
+                  const isCut = item.data.isCut
+                  return (
+                    <div key={item.data.id} className="relative flex items-center justify-center my-2.5 select-none">
+                      <div className="absolute inset-0 flex items-center" aria-hidden="true">
+                        <div
+                          className={`w-full border-t transition-colors ${
+                            isCut ? 'border-zinc-800/80 border-dashed' : 'border-zinc-800'
+                          }`}
+                        />
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={() => toggleSilenceCut(item.data.id)}
+                        className={`relative inline-flex items-center gap-2 px-3.5 h-7 rounded-full text-xs font-mono tabular-nums transition shadow-sm ${
+                          isCut
+                            ? 'bg-zinc-900 hover:bg-zinc-800 text-zinc-400 border border-zinc-800 hover:border-zinc-700'
+                            : 'bg-zinc-900 hover:bg-zinc-800 text-zinc-300 border border-red-900/60 hover:border-red-800'
+                        }`}
+                        title={isCut ? 'Пауза вырезана. Нажмите, чтобы восстановить.' : 'Пауза остаётся в видео. Нажмите, чтобы вырезать.'}
+                      >
+                        <Scissors className={`w-3.5 h-3.5 shrink-0 ${isCut ? 'text-zinc-500' : 'text-red-400'}`} />
+                        <span className={isCut ? 'text-zinc-500' : 'text-zinc-300 font-medium'}>
+                          Пауза {item.data.duration.toFixed(1)} с
+                        </span>
+                        <span
+                          className={`text-[11px] font-sans font-medium px-2 py-0.5 rounded-full uppercase tracking-wider ${
+                            isCut ? 'bg-zinc-800 text-zinc-400' : 'bg-red-950 text-red-300 border border-red-800/60'
+                          }`}
+                        >
+                          {isCut ? 'Вырезана' : 'Вырезать'}
+                        </span>
+                      </button>
+                    </div>
+                  )
+                }
+
+                return null
+              })
+            })()}
 
           </div>
 
@@ -2059,67 +2197,67 @@ export default function App() {
 
         {/* SETTINGS MODAL */}
         {isSettingsOpen && (
-          <div className="absolute inset-0 bg-black/60 backdrop-blur-sm z-30 flex items-center justify-center p-4">
-            <div className="w-full max-w-lg max-h-[90vh] bg-zinc-900 border border-zinc-800 rounded-xl shadow-2xl p-6 flex flex-col animate-in fade-in duration-150">
+          <div className="absolute inset-0 bg-black/70 backdrop-blur-md z-40 flex items-center justify-center p-4">
+            <div className="w-full max-w-xl max-h-[90vh] bg-zinc-900 border border-zinc-700/80 rounded-2xl shadow-2xl p-6 flex flex-col animate-in fade-in duration-150">
               
               {/* Header */}
-              <div className="flex items-center justify-between pb-3 border-b border-zinc-800 flex-shrink-0">
-                <div className="flex items-center gap-2.5">
-                  <div className="w-7 h-7 rounded bg-zinc-800 border border-zinc-700 flex items-center justify-center text-zinc-300">
+              <div className="flex items-center justify-between pb-3.5 border-b border-zinc-800 flex-shrink-0">
+                <div className="flex items-center gap-3">
+                  <div className="w-8 h-8 rounded-lg bg-zinc-800 border border-zinc-700 flex items-center justify-center text-zinc-200 shadow-sm">
                     <SlidersHorizontal className="w-4 h-4" />
                   </div>
                   <div>
-                    <h2 className="text-sm font-semibold text-zinc-100">Настройки</h2>
-                    <p className="text-[11px] text-zinc-400">Параметры монтажа, субтитров и звука</p>
+                    <h2 className="text-sm font-semibold text-zinc-100">Параметры проекта</h2>
+                    <p className="text-[11px] text-zinc-400">Настройки монтажа, субтитров и звуковой дорожки</p>
                   </div>
                 </div>
                 <button
                   onClick={() => setIsSettingsOpen(false)}
-                  className="w-7 h-7 rounded hover:bg-zinc-800 text-zinc-400 hover:text-white flex items-center justify-center transition"
+                  className="w-8 h-8 rounded-lg hover:bg-zinc-800 text-zinc-400 hover:text-white flex items-center justify-center transition"
                 >
                   <X className="w-4 h-4" />
                 </button>
               </div>
 
               {/* Body Controls */}
-              <div className="space-y-4 text-xs overflow-y-auto pr-1 flex-1 py-2">
+              <div className="space-y-4 text-xs overflow-y-auto pr-1 flex-1 py-3">
                 
                 {/* 1. Framing Mode */}
                 <div className="space-y-1.5">
                   <div className="flex items-center justify-between">
-                    <label className="font-medium text-zinc-200 flex items-center gap-1.5">
+                    <label className="font-medium text-zinc-200 flex items-center gap-2">
                       <Smartphone className="w-3.5 h-3.5 text-indigo-400" />
                       <span>Формат кадра</span>
                     </label>
-                    <span className="font-mono text-zinc-400">
+                    <span className="font-sans text-xs text-zinc-400">
                       {framingMode === 'blur_9_16' ? '9:16 с размытием фона' : 'Оригинал'}
                     </span>
                   </div>
-                  <div className="grid grid-cols-2 gap-2">
+                  <div className="grid grid-cols-2 gap-2.5">
                     <button
                       onClick={() => setFramingMode('original')}
-                      className={`p-2 rounded border text-left transition ${
+                      className={`p-2.5 rounded-lg border text-left transition ${
                         framingMode === 'original'
-                          ? 'bg-zinc-100 text-zinc-950 border-white'
+                          ? 'bg-zinc-100 text-zinc-950 border-white shadow-sm'
                           : 'bg-zinc-950/60 text-zinc-400 border-zinc-800 hover:text-zinc-200'
                       }`}
                     >
-                      <div className="font-semibold text-[11px]">Оригинальный формат</div>
-                      <div className={`text-[10px] ${framingMode === 'original' ? 'text-zinc-700' : 'text-zinc-500'}`}>
+                      <div className="font-semibold text-xs">Оригинальный формат</div>
+                      <div className={`text-[11px] mt-0.5 ${framingMode === 'original' ? 'text-zinc-700' : 'text-zinc-500'}`}>
                         Без изменения соотношения сторон
                       </div>
                     </button>
                     <button
                       onClick={() => setFramingMode('blur_9_16')}
-                      className={`p-2 rounded border text-left transition ${
+                      className={`p-2.5 rounded-lg border text-left transition ${
                         framingMode === 'blur_9_16'
-                          ? 'bg-zinc-100 text-zinc-950 border-white'
+                          ? 'bg-zinc-100 text-zinc-950 border-white shadow-sm'
                           : 'bg-zinc-950/60 text-zinc-400 border-zinc-800 hover:text-zinc-200'
                       }`}
                     >
-                      <div className="font-semibold text-[11px]">9:16 с размытием фона</div>
-                      <div className={`text-[10px] ${framingMode === 'blur_9_16' ? 'text-zinc-700' : 'text-zinc-500'}`}>
-                        Идеально для Reels, Shorts и TikTok
+                      <div className="font-semibold text-xs">9:16 с размытием фона</div>
+                      <div className={`text-[11px] mt-0.5 ${framingMode === 'blur_9_16' ? 'text-zinc-700' : 'text-zinc-500'}`}>
+                        Вертикальный формат для Reels и Shorts
                       </div>
                     </button>
                   </div>
@@ -2130,11 +2268,13 @@ export default function App() {
                 {/* 2. Visual Color Preset */}
                 <div className="space-y-1.5">
                   <div className="flex items-center justify-between">
-                    <label className="font-medium text-zinc-200 flex items-center gap-1.5">
+                    <label className="font-medium text-zinc-200 flex items-center gap-2">
                       <Palette className="w-3.5 h-3.5 text-purple-400" />
                       <span>Цветовой фильтр</span>
                     </label>
-                    <span className="font-mono text-zinc-400 uppercase">{colorPreset}</span>
+                    <span className="font-sans text-xs text-zinc-400">
+                      {colorPreset === 'anime_punch' ? 'Anime Punch' : colorPreset === 'cinematic' ? 'Кино' : colorPreset === 'crisp' ? 'Чёткость' : 'Оригинал'}
+                    </span>
                   </div>
                   <div className="grid grid-cols-4 gap-2">
                     {[
@@ -2146,14 +2286,14 @@ export default function App() {
                       <button
                         key={cp.id}
                         onClick={() => setColorPreset(cp.id)}
-                        className={`p-2 rounded border text-left transition ${
+                        className={`p-2.5 rounded-lg border text-left transition ${
                           colorPreset === cp.id
-                            ? 'bg-zinc-100 text-zinc-950 border-white'
+                            ? 'bg-zinc-100 text-zinc-950 border-white shadow-sm'
                             : 'bg-zinc-950/60 text-zinc-400 border-zinc-800 hover:text-zinc-200'
                         }`}
                       >
-                        <div className="font-semibold text-[11px]">{cp.title}</div>
-                        <div className={`text-[10px] ${colorPreset === cp.id ? 'text-zinc-700' : 'text-zinc-500'}`}>
+                        <div className="font-semibold text-xs">{cp.title}</div>
+                        <div className={`text-[10px] mt-0.5 ${colorPreset === cp.id ? 'text-zinc-700' : 'text-zinc-500'}`}>
                           {cp.desc}
                         </div>
                       </button>
@@ -2164,19 +2304,19 @@ export default function App() {
                 <div className="h-px bg-zinc-800 my-2" />
 
                 {/* 3. Subtitle Customization */}
-                <div className="space-y-3 bg-zinc-950/40 p-3 rounded-lg border border-zinc-800/80">
+                <div className="space-y-3 bg-zinc-950/60 p-3.5 rounded-xl border border-zinc-800">
                   <div className="flex items-center justify-between">
-                    <label className="font-medium text-zinc-200 flex items-center gap-1.5">
+                    <label className="font-medium text-zinc-200 flex items-center gap-2">
                       <Type className="w-3.5 h-3.5 text-amber-400" />
                       <span>Субтитры</span>
                     </label>
-                    <span className="font-mono text-[11px] text-amber-300 uppercase">
-                      {subtitlePreset} · {subtitleSize}px · {subtitlePosition === 'bottom' ? 'снизу' : subtitlePosition === 'center' ? 'центр' : 'сверху'}
+                    <span className="font-sans text-xs text-amber-300 font-medium">
+                      {subtitlePreset === 'hormozi' ? 'Караоке' : subtitlePreset === 'box' ? 'Плашка' : 'Классик'} · <span className="font-mono tabular-nums">{subtitleSize}px</span> · {subtitlePosition === 'bottom' ? 'снизу' : subtitlePosition === 'center' ? 'центр' : 'сверху'}
                     </span>
                   </div>
 
                   {/* 3.1 Style Preset */}
-                  <div className="space-y-1">
+                  <div className="space-y-1.5">
                     <span className="text-[11px] text-zinc-400">Стиль оформления</span>
                     <div className="grid grid-cols-3 gap-2">
                       {[
@@ -2187,14 +2327,14 @@ export default function App() {
                         <button
                           key={st.id}
                           onClick={() => setSubtitlePreset(st.id)}
-                          className={`p-2 rounded border text-left transition ${
+                          className={`p-2.5 rounded-lg border text-left transition ${
                             subtitlePreset === st.id
-                              ? 'bg-zinc-100 text-zinc-950 border-white'
-                              : 'bg-zinc-900/60 text-zinc-400 border-zinc-800 hover:text-zinc-200'
+                              ? 'bg-zinc-100 text-zinc-950 border-white shadow-sm'
+                              : 'bg-zinc-900/80 text-zinc-400 border-zinc-800 hover:text-zinc-200'
                           }`}
                         >
-                          <div className="font-semibold text-[11px]">{st.title}</div>
-                          <div className={`text-[10px] ${subtitlePreset === st.id ? 'text-zinc-700' : 'text-zinc-500'}`}>
+                          <div className="font-semibold text-xs">{st.title}</div>
+                          <div className={`text-[10px] mt-0.5 ${subtitlePreset === st.id ? 'text-zinc-700' : 'text-zinc-500'}`}>
                             {st.desc}
                           </div>
                         </button>
@@ -2206,10 +2346,10 @@ export default function App() {
                   <div className="space-y-1.5">
                     <div className="flex items-center justify-between">
                       <span className="text-[11px] text-zinc-400">Размер шрифта</span>
-                      <span className="font-mono text-zinc-300 font-semibold">{subtitleSize} px</span>
+                      <span className="font-mono text-xs text-amber-300 font-semibold tabular-nums">{subtitleSize} px</span>
                     </div>
                     {/* Preset Buttons */}
-                    <div className="grid grid-cols-4 gap-1.5">
+                    <div className="grid grid-cols-4 gap-2">
                       {[
                         { size: 42, title: 'Компактный', desc: '42 px' },
                         { size: 54, title: 'Стандарт', desc: '54 px' },
@@ -2219,14 +2359,14 @@ export default function App() {
                         <button
                           key={sz.size}
                           onClick={() => setSubtitleSize(sz.size)}
-                          className={`p-1.5 rounded border text-center transition ${
+                          className={`p-2 rounded-lg border text-center transition ${
                             subtitleSize === sz.size
-                              ? 'bg-amber-400 text-zinc-950 border-amber-300'
-                              : 'bg-zinc-900/60 text-zinc-400 border-zinc-800 hover:text-zinc-200'
+                              ? 'bg-amber-400 text-zinc-950 border-amber-300 shadow-sm'
+                              : 'bg-zinc-900/80 text-zinc-400 border-zinc-800 hover:text-zinc-200'
                           }`}
                         >
-                          <div className="font-semibold text-[11px]">{sz.title}</div>
-                          <div className={`text-[10px] font-mono ${subtitleSize === sz.size ? 'text-zinc-900 font-medium' : 'text-zinc-500'}`}>
+                          <div className="font-semibold text-xs">{sz.title}</div>
+                          <div className={`text-[10px] font-mono tabular-nums ${subtitleSize === sz.size ? 'text-zinc-900 font-bold' : 'text-zinc-500'}`}>
                             {sz.desc}
                           </div>
                         </button>
@@ -2234,7 +2374,7 @@ export default function App() {
                     </div>
                     {/* Slider */}
                     <div className="flex items-center gap-2 pt-1">
-                      <span className="text-[10px] text-zinc-500 font-mono">36</span>
+                      <span className="text-[10px] text-zinc-500 font-mono tabular-nums">36</span>
                       <input
                         type="range"
                         min={36}
@@ -2244,12 +2384,12 @@ export default function App() {
                         onChange={(e) => setSubtitleSize(Number(e.target.value))}
                         className="flex-1 h-1.5 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-amber-400"
                       />
-                      <span className="text-[10px] text-zinc-500 font-mono">90</span>
+                      <span className="text-[10px] text-zinc-500 font-mono tabular-nums">90</span>
                     </div>
                   </div>
 
                   {/* 3.3 Position */}
-                  <div className="space-y-1">
+                  <div className="space-y-1.5">
                     <span className="text-[11px] text-zinc-400">Расположение по вертикали</span>
                     <div className="grid grid-cols-3 gap-2">
                       {[
@@ -2260,14 +2400,14 @@ export default function App() {
                         <button
                           key={pos.id}
                           onClick={() => setSubtitlePosition(pos.id)}
-                          className={`p-2 rounded border text-left transition ${
+                          className={`p-2.5 rounded-lg border text-left transition ${
                             subtitlePosition === pos.id
-                              ? 'bg-zinc-100 text-zinc-950 border-white'
-                              : 'bg-zinc-900/60 text-zinc-400 border-zinc-800 hover:text-zinc-200'
+                              ? 'bg-zinc-100 text-zinc-950 border-white shadow-sm'
+                              : 'bg-zinc-900/80 text-zinc-400 border-zinc-800 hover:text-zinc-200'
                           }`}
                         >
-                          <div className="font-semibold text-[11px]">{pos.title}</div>
-                          <div className={`text-[10px] ${subtitlePosition === pos.id ? 'text-zinc-700' : 'text-zinc-500'}`}>
+                          <div className="font-semibold text-xs">{pos.title}</div>
+                          <div className={`text-[10px] mt-0.5 ${subtitlePosition === pos.id ? 'text-zinc-700' : 'text-zinc-500'}`}>
                             {pos.desc}
                           </div>
                         </button>
@@ -2281,12 +2421,12 @@ export default function App() {
                 {/* 4. Background Music & Auto-Ducking */}
                 <div className="space-y-2">
                   <div className="flex items-center justify-between">
-                    <label className="font-medium text-zinc-200 flex items-center gap-1.5">
+                    <label className="font-medium text-zinc-200 flex items-center gap-2">
                       <Music className="w-3.5 h-3.5 text-indigo-400" />
                       <span>Фоновая музыка</span>
                     </label>
                     {bgMusicPath ? (
-                      <span className="font-mono text-[11px] text-indigo-400 font-medium">
+                      <span className="font-mono text-xs text-indigo-400 font-medium tabular-nums">
                         {Math.round(bgMusicVolume * 100)}% {autoDucking ? `(Авто: ${duckingPreset === 'soft' ? '-10' : duckingPreset === 'hard' ? '-18' : '-14'} dB)` : ''}
                       </span>
                     ) : (
@@ -2297,32 +2437,32 @@ export default function App() {
                   {!bgMusicPath ? (
                     <button
                       onClick={handleSelectBgMusic}
-                      className="w-full h-8 rounded bg-indigo-950/40 hover:bg-indigo-900/50 border border-indigo-700/60 hover:border-indigo-500 text-indigo-200 flex items-center justify-center gap-2 text-xs font-medium transition"
+                      className="w-full h-9 rounded-lg bg-indigo-950/40 hover:bg-indigo-900/50 border border-indigo-700/60 hover:border-indigo-500 text-indigo-200 flex items-center justify-center gap-2 text-xs font-medium transition shadow-sm"
                     >
                       <Music className="w-3.5 h-3.5 text-indigo-400" />
                       <span>Выбрать фоновую музыку</span>
                     </button>
                   ) : (
-                    <div className="space-y-2.5 bg-zinc-950/70 p-2.5 rounded-lg border border-zinc-800">
+                    <div className="space-y-2.5 bg-zinc-950/70 p-3 rounded-xl border border-zinc-800">
                       {/* Track Info & Actions */}
-                      <div className="flex items-center justify-between gap-2 bg-zinc-900/90 px-2.5 py-1.5 rounded border border-zinc-800/80">
+                      <div className="flex items-center justify-between gap-2 bg-zinc-900/90 px-3 py-2 rounded-lg border border-zinc-800">
                         <div className="flex items-center gap-2 min-w-0">
                           <Music className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
-                          <span className="text-[11px] font-mono text-zinc-200 truncate" title={bgMusicPath}>
+                          <span className="text-xs font-mono text-zinc-200 truncate" title={bgMusicPath}>
                             {bgMusicName}
                           </span>
                         </div>
-                        <div className="flex items-center gap-1.5 shrink-0">
+                        <div className="flex items-center gap-2 shrink-0">
                           <button
                             onClick={handleSelectBgMusic}
-                            className="text-[10px] text-zinc-400 hover:text-zinc-200 underline px-1 transition"
+                            className="text-[11px] text-zinc-400 hover:text-zinc-200 underline px-1 transition"
                             title="Выбрать другой файл"
                           >
                             Заменить
                           </button>
                           <button
                             onClick={handleClearBgMusic}
-                            className="w-5 h-5 rounded hover:bg-zinc-800 text-zinc-400 hover:text-red-400 flex items-center justify-center transition"
+                            className="w-6 h-6 rounded-md hover:bg-zinc-800 text-zinc-400 hover:text-red-400 flex items-center justify-center transition"
                             title="Удалить трек"
                           >
                             <X className="w-3.5 h-3.5" />
@@ -2332,9 +2472,9 @@ export default function App() {
 
                       {/* Music Volume Slider */}
                       <div className="space-y-1">
-                        <div className="flex items-center justify-between text-[11px]">
+                        <div className="flex items-center justify-between text-xs">
                           <span className="text-zinc-400">Громкость музыки</span>
-                          <span className="font-mono text-zinc-200">{Math.round(bgMusicVolume * 100)}%</span>
+                          <span className="font-mono text-zinc-200 tabular-nums">{Math.round(bgMusicVolume * 100)}%</span>
                         </div>
                         <input
                           type="range"
@@ -2345,7 +2485,7 @@ export default function App() {
                           onChange={(e) => setBgMusicVolume(parseFloat(e.target.value))}
                           className="w-full accent-indigo-500 bg-zinc-800 h-1.5 rounded-lg cursor-pointer"
                         />
-                        <div className="flex justify-between text-[9px] text-zinc-600 font-mono">
+                        <div className="flex justify-between text-[10px] text-zinc-600 font-mono tabular-nums">
                           <span>0%</span>
                           <span>15% (по умолчанию)</span>
                           <span>100%</span>
@@ -2353,7 +2493,7 @@ export default function App() {
                       </div>
 
                       {/* Auto-Ducking Toggle & Presets */}
-                      <div className="pt-2 border-t border-zinc-800/80 space-y-2">
+                      <div className="pt-2 border-t border-zinc-800 space-y-2">
                         <label className="flex items-start gap-2.5 cursor-pointer select-none">
                           <input
                             type="checkbox"
@@ -2362,21 +2502,21 @@ export default function App() {
                             className="mt-0.5 accent-indigo-500 rounded cursor-pointer"
                           />
                           <div>
-                            <div className="text-xs font-semibold text-zinc-200 flex items-center gap-1.5">
+                            <div className="text-xs font-semibold text-zinc-200 flex items-center gap-2">
                               <span>Авто-приглушение (Auto-Ducking)</span>
-                              <span className="text-[10px] px-1 py-0.2 rounded bg-indigo-950 text-indigo-300 font-normal">
+                              <span className="text-[10px] px-1.5 py-0.5 rounded bg-indigo-950 text-indigo-300 font-normal">
                                 Речь на первом плане
                               </span>
                             </div>
-                            <p className="text-[10px] text-zinc-400 leading-snug mt-0.5">
+                            <p className="text-[11px] text-zinc-400 leading-snug mt-0.5">
                               Музыка автоматически стихает при речи и плавно возвращается на паузах
                             </p>
                           </div>
                         </label>
 
                         {autoDucking && (
-                          <div className="pl-6 space-y-1 animate-in fade-in duration-100">
-                            <span className="text-[10px] text-zinc-400">Глубина приглушения:</span>
+                          <div className="pl-6 space-y-1.5 animate-in fade-in duration-100">
+                            <span className="text-[11px] text-zinc-400">Глубина приглушения:</span>
                             <div className="grid grid-cols-3 gap-2">
                               {[
                                 { id: 'soft' as const, label: 'Мягкое (-10 dB)', desc: 'Легкий спад' },
@@ -2386,14 +2526,14 @@ export default function App() {
                                 <button
                                   key={dp.id}
                                   onClick={() => setDuckingPreset(dp.id)}
-                                  className={`p-1.5 rounded border text-left transition ${
+                                  className={`p-2 rounded-lg border text-left transition ${
                                     duckingPreset === dp.id
-                                      ? 'bg-zinc-100 text-zinc-950 border-white'
+                                      ? 'bg-zinc-100 text-zinc-950 border-white shadow-sm'
                                       : 'bg-zinc-900 text-zinc-400 border-zinc-800 hover:text-zinc-200'
                                   }`}
                                 >
-                                  <div className="font-semibold text-[10px]">{dp.label}</div>
-                                  <div className={`text-[9px] ${duckingPreset === dp.id ? 'text-zinc-700' : 'text-zinc-500'}`}>
+                                  <div className="font-semibold text-[11px]">{dp.label}</div>
+                                  <div className={`text-[10px] mt-0.5 ${duckingPreset === dp.id ? 'text-zinc-700' : 'text-zinc-500'}`}>
                                     {dp.desc}
                                   </div>
                                 </button>
@@ -2408,14 +2548,16 @@ export default function App() {
 
                 <div className="h-px bg-zinc-800 my-2" />
 
-                {/* 2. GPU Hardware Acceleration */}
+                {/* 5. GPU Hardware Acceleration */}
                 <div className="space-y-1.5">
                   <div className="flex items-center justify-between">
-                    <label className="font-medium text-zinc-200 flex items-center gap-1.5">
+                    <label className="font-medium text-zinc-200 flex items-center gap-2">
                       <Zap className="w-3.5 h-3.5 text-emerald-400" />
                       <span>Аппаратное ускорение (GPU)</span>
                     </label>
-                    <span className="font-mono text-emerald-400 font-medium">NVIDIA NVENC</span>
+                    <span className="font-mono text-emerald-400 font-medium text-xs">
+                      {hardwareAccel === 'nvenc' ? 'NVIDIA NVENC' : hardwareAccel === 'cpu' ? 'CPU (libx264)' : 'Автоматически'}
+                    </span>
                   </div>
                   <div className="grid grid-cols-3 gap-2">
                     {[
@@ -2426,9 +2568,9 @@ export default function App() {
                       <button
                         key={opt.id}
                         onClick={() => setHardwareAccel(opt.id)}
-                        className={`h-7 rounded border font-mono text-[11px] transition ${
+                        className={`h-8 rounded-lg border font-mono text-xs transition ${
                           hardwareAccel === opt.id
-                            ? 'bg-zinc-100 text-zinc-950 border-white font-medium'
+                            ? 'bg-zinc-100 text-zinc-950 border-white font-medium shadow-sm'
                             : 'bg-zinc-950/60 text-zinc-400 border-zinc-800 hover:text-zinc-200'
                         }`}
                       >
@@ -2436,25 +2578,25 @@ export default function App() {
                       </button>
                     ))}
                   </div>
-                  <p className="text-[10px] text-zinc-500">
+                  <p className="text-[11px] text-zinc-500">
                     NVENC ускоряет экспорт на видеокартах NVIDIA.
                   </p>
                 </div>
 
                 <div className="h-px bg-zinc-800 my-2" />
 
-                {/* 3. Pause Detection Mode */}
+                {/* 6. Pause Detection Mode */}
                 <div className="space-y-1.5">
                   <div className="flex items-center justify-between">
-                    <label className="font-medium text-zinc-200 flex items-center gap-1.5">
+                    <label className="font-medium text-zinc-200 flex items-center gap-2">
                       <Scissors className="w-3.5 h-3.5 text-red-400" />
                       <span>Поиск пауз</span>
                     </label>
-                    <span className="font-mono text-zinc-400 text-xs">
+                    <span className="font-sans text-zinc-400 text-xs">
                       {pauseMode === 'smart' ? 'По речи (Whisper)' : 'По громкости (FFmpeg)'}
                     </span>
                   </div>
-                  <div className="grid grid-cols-2 gap-2">
+                  <div className="grid grid-cols-2 gap-2.5">
                     {[
                       { val: 'smart', label: 'По речи (Whisper)', desc: 'Паузы между словами, подходит для видео с музыкой' },
                       { val: 'volume', label: 'По громкости', desc: 'Участки тише заданного порога, для записей без музыки' },
@@ -2462,14 +2604,14 @@ export default function App() {
                       <button
                         key={opt.val}
                         onClick={() => setPauseMode(opt.val as 'smart' | 'volume')}
-                        className={`p-2.5 rounded border text-left transition ${
+                        className={`p-2.5 rounded-lg border text-left transition ${
                           pauseMode === opt.val
-                            ? 'bg-zinc-100 text-zinc-950 border-white'
+                            ? 'bg-zinc-100 text-zinc-950 border-white shadow-sm'
                             : 'bg-zinc-950/60 text-zinc-400 border-zinc-800 hover:text-zinc-200'
                         }`}
                       >
                         <div className="text-xs font-semibold">{opt.label}</div>
-                        <div className={`text-[10px] mt-0.5 leading-snug ${pauseMode === opt.val ? 'text-zinc-700' : 'text-zinc-500'}`}>
+                        <div className={`text-[11px] mt-0.5 leading-snug ${pauseMode === opt.val ? 'text-zinc-700' : 'text-zinc-500'}`}>
                           {opt.desc}
                         </div>
                       </button>
@@ -2477,12 +2619,12 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* 4. Silence Threshold (dB) */}
+                {/* Silence Threshold (dB) */}
                 {pauseMode === 'volume' && (
                   <div className="space-y-1.5 animate-in fade-in duration-100">
                     <div className="flex items-center justify-between">
                       <label className="font-medium text-zinc-200">Порог громкости</label>
-                      <span className="font-mono text-zinc-400">{silenceThreshold} dB</span>
+                      <span className="font-mono text-zinc-400 tabular-nums">{silenceThreshold} dB</span>
                     </div>
                     <div className="grid grid-cols-4 gap-2">
                       {[
@@ -2494,9 +2636,9 @@ export default function App() {
                         <button
                           key={opt.val}
                           onClick={() => setSilenceThreshold(opt.val)}
-                          className={`h-7 rounded border font-mono text-[11px] transition ${
+                          className={`h-8 rounded-lg border font-mono text-[11px] tabular-nums transition ${
                             silenceThreshold === opt.val
-                              ? 'bg-zinc-100 text-zinc-950 border-white font-medium'
+                              ? 'bg-zinc-100 text-zinc-950 border-white font-medium shadow-sm'
                               : 'bg-zinc-950/60 text-zinc-400 border-zinc-800 hover:text-zinc-200'
                           }`}
                         >
@@ -2507,11 +2649,11 @@ export default function App() {
                   </div>
                 )}
 
-                {/* 5. Minimum Silence Duration */}
+                {/* Minimum Silence Duration */}
                 <div className="space-y-1.5">
                   <div className="flex items-center justify-between">
                     <label className="font-medium text-zinc-200">Минимальная пауза</label>
-                    <span className="font-mono text-zinc-400">{minSilenceDuration} с</span>
+                    <span className="font-mono text-zinc-400 tabular-nums">{minSilenceDuration} с</span>
                   </div>
                   <div className="grid grid-cols-4 gap-2">
                     {[
@@ -2523,9 +2665,9 @@ export default function App() {
                       <button
                         key={opt.val}
                         onClick={() => setMinSilenceDuration(opt.val)}
-                        className={`h-7 rounded border font-mono text-[11px] transition ${
+                        className={`h-8 rounded-lg border font-mono text-[11px] tabular-nums transition ${
                           minSilenceDuration === opt.val
-                            ? 'bg-zinc-100 text-zinc-950 border-white font-medium'
+                            ? 'bg-zinc-100 text-zinc-950 border-white font-medium shadow-sm'
                             : 'bg-zinc-950/60 text-zinc-400 border-zinc-800 hover:text-zinc-200'
                         }`}
                       >
@@ -2543,19 +2685,19 @@ export default function App() {
                       setIsSettingsOpen(false)
                     }}
                     disabled={isAnalyzing}
-                    className="w-full h-8 rounded bg-zinc-800 hover:bg-zinc-750 border border-zinc-700 text-zinc-200 flex items-center justify-center gap-2 font-medium transition text-xs"
+                    className="w-full h-9 rounded-lg bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-zinc-200 flex items-center justify-center gap-2 font-medium transition text-xs shadow-sm"
                   >
                     <RefreshCw className={`w-3.5 h-3.5 ${isAnalyzing ? 'animate-spin' : ''}`} />
-                    <span>Обновить паузы</span>
+                    <span>Пересчитать паузы</span>
                   </button>
                 )}
 
                 <div className="h-px bg-zinc-800 my-2" />
 
-                {/* 5. Whisper Model Selection */}
+                {/* 7. Whisper Model Selection */}
                 <div className="space-y-1.5">
                   <div className="flex items-center justify-between">
-                    <label className="font-medium text-zinc-200 flex items-center gap-1.5">
+                    <label className="font-medium text-zinc-200 flex items-center gap-2">
                       <Sparkles className="w-3.5 h-3.5 text-amber-400" />
                       <span>Модель Whisper</span>
                     </label>
@@ -2570,9 +2712,9 @@ export default function App() {
                       <button
                         key={opt.val}
                         onClick={() => setWhisperModel(opt.val)}
-                        className={`h-8 px-2 rounded border text-[11px] transition ${
+                        className={`h-8 px-2 rounded-lg border text-xs transition ${
                           whisperModel === opt.val
-                            ? 'bg-zinc-100 text-zinc-950 border-white font-medium'
+                            ? 'bg-zinc-100 text-zinc-950 border-white font-medium shadow-sm'
                             : 'bg-zinc-950/60 text-zinc-400 border-zinc-800 hover:text-zinc-200'
                         }`}
                       >
@@ -2582,10 +2724,10 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* 6. Whisper Language Selection */}
+                {/* 8. Whisper Language Selection */}
                 <div className="space-y-1.5">
                   <div className="flex items-center justify-between">
-                    <label className="font-medium text-zinc-200 flex items-center gap-1.5">
+                    <label className="font-medium text-zinc-200 flex items-center gap-2">
                       <Globe className="w-3.5 h-3.5 text-blue-400" />
                       <span>Язык речи</span>
                     </label>
@@ -2600,9 +2742,9 @@ export default function App() {
                       <button
                         key={opt.val}
                         onClick={() => setSpeechLanguage(opt.val)}
-                        className={`h-8 px-2 rounded border text-[11px] transition ${
+                        className={`h-8 px-2 rounded-lg border text-xs transition ${
                           speechLanguage === opt.val
-                            ? 'bg-zinc-100 text-zinc-950 border-white font-medium'
+                            ? 'bg-zinc-100 text-zinc-950 border-white font-medium shadow-sm'
                             : 'bg-zinc-950/60 text-zinc-400 border-zinc-800 hover:text-zinc-200'
                         }`}
                       >
@@ -2610,7 +2752,7 @@ export default function App() {
                       </button>
                     ))}
                   </div>
-                  <p className="text-[10px] text-zinc-400">
+                  <p className="text-[11px] text-zinc-400">
                     Язык исходной речи для точного распознавания.
                   </p>
                 </div>
@@ -2623,7 +2765,7 @@ export default function App() {
                       setIsSettingsOpen(false)
                     }}
                     disabled={isAnalyzing}
-                    className="w-full h-8 rounded bg-zinc-800 hover:bg-zinc-750 border border-zinc-700 text-zinc-200 flex items-center justify-center gap-2 font-medium transition text-xs"
+                    className="w-full h-9 rounded-lg bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-zinc-200 flex items-center justify-center gap-2 font-medium transition text-xs shadow-sm"
                   >
                     <Sparkles className={`w-3.5 h-3.5 text-amber-400 ${isAnalyzing ? 'animate-spin' : ''}`} />
                     <span>Распознать заново</span>
@@ -2633,10 +2775,10 @@ export default function App() {
               </div>
 
               {/* Footer */}
-              <div className="flex justify-end pt-3 border-t border-zinc-800 flex-shrink-0 mt-2">
+              <div className="flex justify-end pt-3.5 border-t border-zinc-800 flex-shrink-0 mt-2">
                 <button
                   onClick={() => setIsSettingsOpen(false)}
-                  className="h-8 px-4 rounded bg-zinc-100 hover:bg-white text-zinc-950 text-xs font-semibold transition"
+                  className="h-9 px-5 rounded-lg bg-zinc-100 hover:bg-white text-zinc-950 text-xs font-semibold transition shadow-sm"
                 >
                   Готово
                 </button>
@@ -2646,25 +2788,25 @@ export default function App() {
           </div>
         )}
 
-        {/* SMART COVER / POSTER GENERATOR MODAL (Фича 8) */}
+        {/* SMART COVER / POSTER GENERATOR MODAL */}
         {isCoverModalOpen && (
           <div className="absolute inset-0 bg-black/80 backdrop-blur-md z-40 flex items-center justify-center p-4">
-            <div className="w-full max-w-4xl bg-zinc-900 border border-zinc-800 rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[92vh] animate-in fade-in duration-150">
+            <div className="w-full max-w-4xl bg-zinc-900 border border-zinc-700/80 rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[92vh] animate-in fade-in duration-150">
               
               {/* Modal Header */}
               <div className="h-12 px-5 border-b border-zinc-800 flex items-center justify-between flex-shrink-0 bg-zinc-900/80">
                 <div className="flex items-center gap-2.5">
-                  <div className="w-7 h-7 rounded bg-indigo-950/80 border border-indigo-800/80 flex items-center justify-center text-indigo-300">
+                  <div className="w-8 h-8 rounded-lg bg-indigo-950/80 border border-indigo-800/80 flex items-center justify-center text-indigo-300 shadow-sm">
                     <ImageIcon className="w-4 h-4" />
                   </div>
                   <div>
                     <h2 className="text-sm font-semibold text-zinc-100">Генератор обложки для Reels и Shorts</h2>
-                    <p className="text-[11px] text-zinc-400">Выберите яркий кадр и добавьте цепляющий заголовок</p>
+                    <p className="text-[11px] text-zinc-400">Экспорт стоп-кадра с типографикой для публикации</p>
                   </div>
                 </div>
                 <button
                   onClick={() => setIsCoverModalOpen(false)}
-                  className="w-7 h-7 rounded hover:bg-zinc-800 text-zinc-400 hover:text-white flex items-center justify-center transition"
+                  className="w-8 h-8 rounded-lg hover:bg-zinc-800 text-zinc-400 hover:text-white flex items-center justify-center transition"
                 >
                   <X className="w-4 h-4" />
                 </button>
@@ -2677,7 +2819,7 @@ export default function App() {
                 <div className="md:col-span-5 flex flex-col items-center">
                   <div className="text-xs font-medium text-zinc-400 mb-2 flex items-center justify-between w-full max-w-[260px]">
                     <span>Предпросмотр 9:16</span>
-                    <span className="font-mono text-zinc-500">{formatTime(coverTime)}</span>
+                    <span className="font-mono text-zinc-400 tabular-nums">{formatTime(coverTime)}</span>
                   </div>
 
                   <div className="relative aspect-[9/16] w-full max-w-[260px] bg-black rounded-xl border border-zinc-700/80 overflow-hidden shadow-2xl flex flex-col justify-between select-none">
@@ -2712,19 +2854,19 @@ export default function App() {
                     {coverTitleStyle !== 'none' && coverTitle.trim() && (
                       <div className="absolute inset-x-3 bottom-10 z-20 text-center">
                         {coverTitleStyle === 'hormozi' ? (
-                          <div className="inline-block px-3 py-2 rounded-xl bg-black/85 border border-amber-400/50 shadow-2xl drop-shadow-[0_4px_12px_rgba(0,0,0,1)] max-w-[94%]">
+                          <div className="inline-block px-3.5 py-2 rounded-xl bg-black/85 border border-amber-400/50 shadow-2xl drop-shadow-[0_4px_12px_rgba(0,0,0,1)] max-w-[94%]">
                             <span className="text-amber-300 font-black text-sm uppercase tracking-wider drop-shadow-[0_2px_8px_rgba(0,0,0,1)] break-words leading-tight">
                               {coverTitle}
                             </span>
                           </div>
                         ) : coverTitleStyle === 'neon' ? (
-                          <div className="inline-block px-3 py-2 rounded-xl bg-black/85 border border-cyan-400/60 shadow-[0_0_20px_rgba(6,182,212,0.45)] max-w-[94%]">
+                          <div className="inline-block px-3.5 py-2 rounded-xl bg-black/85 border border-cyan-400/60 shadow-[0_0_20px_rgba(6,182,212,0.45)] max-w-[94%]">
                             <span className="text-cyan-300 font-extrabold text-sm uppercase tracking-wider drop-shadow-[0_0_12px_rgba(34,211,238,0.95)] break-words leading-tight">
                               {coverTitle}
                             </span>
                           </div>
                         ) : (
-                          <div className="inline-block px-3 py-1.5 rounded-lg bg-black/60 backdrop-blur-sm shadow-xl max-w-[94%]">
+                          <div className="inline-block px-3.5 py-2 rounded-xl bg-black/60 backdrop-blur-sm shadow-xl max-w-[94%]">
                             <span className="text-white font-bold text-sm drop-shadow-[0_2px_4px_rgba(0,0,0,0.9)] break-words leading-tight">
                               {coverTitle}
                             </span>
@@ -2734,8 +2876,8 @@ export default function App() {
                     )}
 
                     {/* Timecode Badge */}
-                    <div className="absolute top-2.5 right-2.5 z-20">
-                      <span className="text-[10px] font-mono font-medium px-1.5 py-0.5 rounded bg-black/70 text-zinc-400 backdrop-blur-sm">
+                    <div className="absolute top-3 right-3 z-20">
+                      <span className="text-xs font-mono tabular-nums font-medium px-2 py-1 rounded-md bg-black/75 text-zinc-300 backdrop-blur-md border border-zinc-700/70 shadow-md">
                         {formatTime(coverTime)}
                       </span>
                     </div>
@@ -2748,8 +2890,8 @@ export default function App() {
                   {/* 1. Keyframe Scrubber */}
                   <div className="space-y-2 bg-zinc-950/60 p-3.5 rounded-xl border border-zinc-800">
                     <div className="flex items-center justify-between">
-                      <label className="font-semibold text-zinc-200">Выбор кадра для обложки</label>
-                      <span className="font-mono text-indigo-400 font-medium">
+                      <label className="font-semibold text-zinc-200">Выбор кадра</label>
+                      <span className="font-mono text-indigo-400 font-medium tabular-nums">
                         {formatTime(coverTime)} / {formatTime(totalDuration)}
                       </span>
                     </div>
@@ -2766,8 +2908,8 @@ export default function App() {
 
                     {/* Quick speech phrase badges */}
                     {sampledCoverPhrases.length > 0 && (
-                      <div className="pt-1 space-y-1.5">
-                        <div className="text-[11px] text-zinc-400">Быстрый переход по фразам:</div>
+                      <div className="pt-1.5 space-y-1.5">
+                        <div className="text-[11px] text-zinc-400">Фразы из аудиодорожки:</div>
                         <div className="flex flex-wrap gap-1.5 max-h-28 overflow-y-auto pr-1">
                           {sampledCoverPhrases.map((p) => {
                             const isSelected = Math.abs(coverTime - p.data.startTime) < 0.8
@@ -2778,14 +2920,14 @@ export default function App() {
                                   updateCoverTime(p.data.startTime)
                                   setCoverTitle(p.data.text)
                                 }}
-                                className={`px-2 py-1 rounded text-[10px] font-mono border transition text-left truncate max-w-full ${
+                                className={`px-2.5 py-1 rounded-md text-[11px] font-mono tabular-nums border transition text-left truncate max-w-full ${
                                   isSelected
-                                    ? 'bg-indigo-950/90 text-indigo-300 border-indigo-700 shadow-sm'
-                                    : 'bg-zinc-900/60 text-zinc-400 border-zinc-800 hover:text-zinc-200'
+                                    ? 'bg-indigo-950/90 text-indigo-200 border-indigo-700 shadow-sm'
+                                    : 'bg-zinc-900/70 text-zinc-400 border-zinc-800 hover:text-zinc-200'
                                 }`}
                               >
-                                <span className="text-zinc-500 mr-1">{formatTime(p.data.startTime)}</span>
-                                <span>{p.data.text.slice(0, 30)}{p.data.text.length > 30 ? '...' : ''}</span>
+                                <span className="text-zinc-500 mr-1.5">{formatTime(p.data.startTime)}</span>
+                                <span>{p.data.text.slice(0, 32)}{p.data.text.length > 32 ? '...' : ''}</span>
                               </button>
                             )
                           })}
@@ -2797,23 +2939,24 @@ export default function App() {
                   {/* 2. Title Text Input */}
                   <div className="space-y-1.5 bg-zinc-950/60 p-3.5 rounded-xl border border-zinc-800">
                     <div className="flex items-center justify-between">
-                      <label className="font-semibold text-zinc-200">Текст на обложке</label>
+                      <label className="font-semibold text-zinc-200">Заголовок на обложке</label>
                       <button
                         onClick={() => {
                           const match = phraseList.find((p) => coverTime >= p.data.startTime && coverTime <= p.data.endTime + 0.4)
                           if (match) setCoverTitle(match.data.text)
                         }}
-                        className="text-[11px] text-amber-400 hover:text-amber-300 transition"
+                        className="text-[11px] text-amber-400 hover:text-amber-300 transition flex items-center gap-1"
                       >
-                        ✨ Взять фразу из кадра
+                        <Sparkles className="w-3 h-3" />
+                        <span>Вставить фразу из кадра</span>
                       </button>
                     </div>
                     <input
                       type="text"
                       value={coverTitle}
                       onChange={(e) => setCoverTitle(e.target.value)}
-                      placeholder="Введите цепляющий заголовок для Reels..."
-                      className="w-full h-8 px-2.5 rounded bg-zinc-900 border border-zinc-700 text-xs text-zinc-200 placeholder-zinc-500 focus:outline-none focus:border-indigo-500"
+                      placeholder="Введите цепляющий заголовок для публикации..."
+                      className="w-full h-8 px-3 rounded-lg bg-zinc-900 border border-zinc-700 text-xs text-zinc-200 placeholder-zinc-500 focus:outline-none focus:border-indigo-500 transition"
                     />
                   </div>
 
@@ -2830,14 +2973,14 @@ export default function App() {
                         <button
                           key={st.id}
                           onClick={() => setCoverTitleStyle(st.id)}
-                          className={`p-2 rounded border text-left transition ${
+                          className={`p-2.5 rounded-lg border text-left transition ${
                             coverTitleStyle === st.id
-                              ? 'bg-zinc-100 text-zinc-950 border-white'
+                              ? 'bg-zinc-100 text-zinc-950 border-white shadow-sm'
                               : 'bg-zinc-900/60 text-zinc-400 border-zinc-800 hover:text-zinc-200'
                           }`}
                         >
-                          <div className="font-semibold text-[11px]">{st.title}</div>
-                          <div className={`text-[10px] ${coverTitleStyle === st.id ? 'text-zinc-700' : 'text-zinc-500'}`}>
+                          <div className="font-semibold text-xs">{st.title}</div>
+                          <div className={`text-[10px] mt-0.5 ${coverTitleStyle === st.id ? 'text-zinc-700' : 'text-zinc-500'}`}>
                             {st.desc}
                           </div>
                         </button>
@@ -2853,9 +2996,9 @@ export default function App() {
                       <div className="grid grid-cols-2 gap-1.5">
                         <button
                           onClick={() => setCoverFraming('blur_9_16')}
-                          className={`h-7 rounded border text-[10px] font-medium transition ${
+                          className={`h-7 rounded-md border text-[11px] font-medium transition ${
                             coverFraming === 'blur_9_16'
-                              ? 'bg-zinc-100 text-zinc-950 border-white'
+                              ? 'bg-zinc-100 text-zinc-950 border-white shadow-sm'
                               : 'bg-zinc-900/60 text-zinc-400 border-zinc-800 hover:text-zinc-200'
                           }`}
                         >
@@ -2863,9 +3006,9 @@ export default function App() {
                         </button>
                         <button
                           onClick={() => setCoverFraming('original')}
-                          className={`h-7 rounded border text-[10px] font-medium transition ${
+                          className={`h-7 rounded-md border text-[11px] font-medium transition ${
                             coverFraming === 'original'
-                              ? 'bg-zinc-100 text-zinc-950 border-white'
+                              ? 'bg-zinc-100 text-zinc-950 border-white shadow-sm'
                               : 'bg-zinc-900/60 text-zinc-400 border-zinc-800 hover:text-zinc-200'
                           }`}
                         >
@@ -2876,7 +3019,7 @@ export default function App() {
 
                     {/* Color */}
                     <div className="space-y-1.5 bg-zinc-950/60 p-3 rounded-xl border border-zinc-800">
-                      <label className="text-[11px] font-semibold text-zinc-300">Цвет</label>
+                      <label className="text-[11px] font-semibold text-zinc-300">Цветовой фильтр</label>
                       <div className="grid grid-cols-4 gap-1">
                         {[
                           { id: 'none' as const, label: 'Ориг' },
@@ -2887,9 +3030,9 @@ export default function App() {
                           <button
                             key={cp.id}
                             onClick={() => setCoverColor(cp.id)}
-                            className={`h-7 rounded border text-[10px] font-medium transition ${
+                            className={`h-7 rounded-md border text-[10px] font-medium transition ${
                               coverColor === cp.id
-                                ? 'bg-zinc-100 text-zinc-950 border-white'
+                                ? 'bg-zinc-100 text-zinc-950 border-white shadow-sm'
                                 : 'bg-zinc-900/60 text-zinc-400 border-zinc-800 hover:text-zinc-200'
                             }`}
                           >
@@ -2901,7 +3044,7 @@ export default function App() {
                   </div>
 
                   {/* 5. Save Action */}
-                  <div className="pt-2">
+                  <div className="pt-1">
                     <button
                       onClick={handleExportCover}
                       disabled={isExporting}
@@ -2956,15 +3099,32 @@ export default function App() {
       </div>
 
       {/* 3. BOTTOM TIMELINE (Height 112px) */}
-      <footer className="h-28 border-t border-zinc-800/80 bg-zinc-900/80 flex flex-col justify-between select-none flex-shrink-0 z-20">
+      <footer className="h-28 border-t border-zinc-800 bg-zinc-900/90 backdrop-blur flex flex-col justify-between select-none flex-shrink-0 z-20">
         
-        {/* Time ruler ticks */}
-        <div className="h-5 px-3 flex justify-between items-center text-[10px] font-mono text-zinc-500 border-b border-zinc-800/40">
-          <span>00:00</span>
-          <span>00:05</span>
-          <span>00:10</span>
-          <span>00:15</span>
-          <span>{formatTime(totalDuration)}</span>
+        {/* Dynamic time ruler ticks with exact percentage positioning and tick marks */}
+        <div className="relative h-5 border-b border-zinc-800/50 text-[10px] font-mono tabular-nums text-zinc-500 overflow-hidden">
+          {[0, 0.25, 0.5, 0.75, 1].map((pct, idx) => {
+            const isFirst = idx === 0
+            const isLast = idx === 4
+            return (
+              <div
+                key={pct}
+                style={{ left: `${pct * 100}%` }}
+                className={`absolute top-0 bottom-0 flex flex-col justify-between ${
+                  isFirst
+                    ? 'left-0 translate-x-2 items-start'
+                    : isLast
+                    ? 'left-full -translate-x-full pr-2 items-end'
+                    : '-translate-x-1/2 items-center'
+                }`}
+              >
+                <span className={isLast ? 'text-zinc-400 font-medium' : ''}>
+                  {formatTime(totalDuration * pct)}
+                </span>
+                <div className="w-px h-1.5 bg-zinc-700/80" />
+              </div>
+            )
+          })}
         </div>
 
         {/* Master Audio Track Canvas */}
@@ -2978,13 +3138,13 @@ export default function App() {
             {waveform.map((peak, idx) => (
               <div
                 key={idx}
-                className="w-[2px] bg-zinc-400 rounded-full"
+                className="w-[2px] bg-zinc-400/80 rounded-full"
                 style={{ height: `${Math.max(8, peak * 0.7)}%` }}
               />
             ))}
           </div>
 
-          {/* Silence Overlay Zones */}
+          {/* Silence Overlay Zones with pattern */}
           {totalDuration > 0 && silences.map((silence) => {
             const left = Math.min(100, Math.max(0, (silence.data.startTime / totalDuration) * 100))
             const width = Math.min(100 - left, Math.max(0, (silence.data.duration / totalDuration) * 100))
@@ -3000,16 +3160,16 @@ export default function App() {
                 style={{ left: `${left}%`, width: `${width}%` }}
                 className={`absolute top-0 bottom-0 flex items-center justify-center transition-all ${
                   isCut
-                    ? 'bg-zinc-950/85 border-x border-zinc-800 opacity-60'
-                    : 'bg-red-950/35 border-x border-red-700/80 hover:bg-red-950/50'
+                    ? 'bg-silence-pattern border-x border-zinc-800 opacity-70'
+                    : 'bg-red-950/40 border-x border-red-700/80 hover:bg-red-950/60'
                 }`}
                 title={`Пауза ${silence.data.duration.toFixed(1)} с (клик — вырезать/оставить)`}
               >
                 <span
-                  className={`text-[9px] font-mono px-1 py-0.5 rounded shadow-sm ${
+                  className={`text-[9px] font-mono tabular-nums px-1.5 py-0.5 rounded shadow-sm ${
                     isCut
-                      ? 'bg-zinc-900 text-zinc-500 line-through'
-                      : 'bg-red-950 text-red-300 border border-red-800/80'
+                      ? 'bg-zinc-900/90 text-zinc-400 line-through border border-zinc-800'
+                      : 'bg-red-950 text-red-300 border border-red-800/80 font-medium'
                   }`}
                 >
                   {isCut ? '✂' : `${silence.data.duration.toFixed(1)}с`}
@@ -3028,18 +3188,18 @@ export default function App() {
         </div>
 
         {/* Timeline Bottom Legend */}
-        <div className="h-6 px-4 bg-zinc-900 border-t border-zinc-800/50 flex items-center justify-between text-[10px] font-mono text-zinc-500">
+        <div className="h-6 px-4 bg-zinc-900/95 border-t border-zinc-800/60 flex items-center justify-between text-xs font-sans text-zinc-400">
           <div className="flex items-center gap-3">
             <span>Пробел — воспроизведение/пауза</span>
-            <span>•</span>
-            <span className="text-zinc-400">← / → — переход на 2 с</span>
+            <span className="text-zinc-600">•</span>
+            <span className="text-zinc-300">← / → — переход на 2 с</span>
           </div>
           <div className="flex items-center gap-2">
             <span>Паузы: {pauseMode === 'smart' ? 'по речи' : `по громкости (${silenceThreshold} dB)`}</span>
-            <span>•</span>
-            <span>Мин. пауза: {minSilenceDuration} с</span>
-            <span>•</span>
-            <span className="text-emerald-400 font-medium">GPU: NVENC</span>
+            <span className="text-zinc-600">•</span>
+            <span>Мин. пауза: <span className="font-mono tabular-nums">{minSilenceDuration} с</span></span>
+            <span className="text-zinc-600">•</span>
+            <span className="text-emerald-400 font-medium font-mono">GPU: NVENC</span>
           </div>
         </div>
 
