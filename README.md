@@ -10,6 +10,10 @@
   <img src="https://img.shields.io/badge/Type-Commercial%20Desktop-green" alt="Commercial Desktop" />
 </p>
 
+<p align="center">
+  <img src="docs/screenshots/subcut-preview.png" alt="Интерфейс SubCut" width="850" />
+</p>
+
 **SubCut** — быстрый, легковесный и полностью автономный настольный ИИ-видеоредактор для Windows.
 
 Создан специально для клипперов, рилсмейкеров и авторов контента, которые устали тратить часы на ручное вырезание пауз, подгонку субтитров и размытие фонов для коротких видео (Reels, Shorts, TikTok).
