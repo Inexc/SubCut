@@ -189,10 +189,10 @@ export function chunkPhrase(phrase: Phrase, maxWords: number = 5): Phrase[] {
   return cues
 }
 
-export function chunkPhrases(phrases: Phrase[]): Phrase[] {
+export function chunkPhrases(phrases: Phrase[], maxWords: number = 5): Phrase[] {
   const result: Phrase[] = []
   for (const p of phrases) {
-    const chunked = chunkPhrase(p, 5)
+    const chunked = chunkPhrase(p, maxWords)
     if (chunked.length === 0) {
       if (p.text.trim()) result.push(p)
     } else {
@@ -205,6 +205,46 @@ export function chunkPhrases(phrases: Phrase[]): Phrase[] {
     }
   }
   return result.map((cue, idx) => ({
+    ...cue,
+    id: `p-${idx + 1}`,
+  }))
+}
+
+export function chunkAllWords(phrases: Phrase[], maxWords: number = 5): Phrase[] {
+  const allWords: Word[] = []
+  for (const p of phrases) {
+    if (p.words && p.words.length > 0) {
+      allWords.push(...p.words)
+    } else {
+      const tokens = p.text.trim().split(/\s+/).filter(Boolean)
+      const dur = Math.max(0.1, p.endTime - p.startTime)
+      const totalChars = Math.max(1, tokens.reduce((acc, t) => acc + t.length, 0))
+      let curTime = p.startTime
+      tokens.forEach((tok, idx) => {
+        const tokDur = Math.max(0.08, dur * (tok.length / totalChars))
+        const wEnd = idx === tokens.length - 1 ? Math.max(curTime + tokDur, p.endTime) : curTime + tokDur
+        allWords.push({
+          word: tok,
+          startTime: Number(curTime.toFixed(2)),
+          endTime: Number(wEnd.toFixed(2)),
+        })
+        curTime = wEnd
+      })
+    }
+  }
+  if (allWords.length === 0) return phrases
+
+  const singlePhrase: Phrase = {
+    id: 'stream',
+    speaker: phrases[0]?.speaker || 'Спикер',
+    startTime: allWords[0].startTime,
+    endTime: allWords[allWords.length - 1].endTime,
+    text: allWords.map((w) => w.word).join(' '),
+    words: allWords,
+  }
+
+  const cues = chunkPhrase(singlePhrase, maxWords)
+  return cues.map((cue, idx) => ({
     ...cue,
     id: `p-${idx + 1}`,
   }))
@@ -456,7 +496,9 @@ export default function App() {
   const [subtitlePreset, setSubtitlePreset] = useState<'hormozi' | 'classic' | 'box'>('hormozi')
   const [subtitleSize, setSubtitleSize] = useState<number>(54)
   const [subtitlePosition, setSubtitlePosition] = useState<'bottom' | 'center' | 'top'>('bottom')
+  const [subtitleDensity, setSubtitleDensity] = useState<'fast' | 'sentence' | 'standard'>('sentence')
   const [isSubtitleMenuOpen, setIsSubtitleMenuOpen] = useState<boolean>(false)
+  const rawPhrasesRef = useRef<Phrase[]>([])
   const [hardwareAccel, setHardwareAccel] = useState<'auto' | 'nvenc' | 'cpu'>('auto')
   const [isSettingsOpen, setIsSettingsOpen] = useState<boolean>(false)
   const [isExportMenuOpen, setIsExportMenuOpen] = useState<boolean>(false)
@@ -837,7 +879,9 @@ export default function App() {
           modelSize: whisperModel,
           language: speechLanguage,
         })
-        phrases = chunkPhrases(rawPhrases)
+        rawPhrasesRef.current = rawPhrases
+        const maxWords = subtitleDensity === 'fast' ? 3 : subtitleDensity === 'sentence' ? 5 : 8
+        phrases = chunkAllWords(rawPhrases, maxWords)
       } catch (wErr) {
         console.warn('Whisper transcription warning:', wErr)
       }
@@ -972,7 +1016,9 @@ export default function App() {
         modelSize: whisperModel,
         language: speechLanguage,
       })
-      const phrases = chunkPhrases(rawPhrases)
+      rawPhrasesRef.current = rawPhrases
+      const maxWords = subtitleDensity === 'fast' ? 3 : subtitleDensity === 'sentence' ? 5 : 8
+      const phrases = chunkAllWords(rawPhrases, maxWords)
 
       let finalGaps: SilenceGap[] = []
       if (pauseMode === 'smart' && phrases.length > 0) {
@@ -1272,6 +1318,52 @@ export default function App() {
         return item
       })
     )
+  }
+
+  // Change subtitle density / chunk length dynamically
+  const handleDensityChange = (density: 'fast' | 'sentence' | 'standard') => {
+    setSubtitleDensity(density)
+    const basePhrases =
+      rawPhrasesRef.current.length > 0
+        ? rawPhrasesRef.current
+        : items.filter((i): i is { type: 'phrase'; data: Phrase } => i.type === 'phrase').map((p) => p.data)
+    if (basePhrases.length === 0) return
+
+    const maxWords = density === 'fast' ? 3 : density === 'sentence' ? 5 : 8
+    const newPhrases = chunkAllWords(basePhrases, maxWords)
+
+    setItems((prevItems) => {
+      const existingCuts = new Set(
+        prevItems
+          .filter((i): i is { type: 'silence'; data: SilenceGap } => i.type === 'silence' && i.data.isCut)
+          .map((i) => i.data.id)
+      )
+      const silences = prevItems.filter((i): i is { type: 'silence'; data: SilenceGap } => i.type === 'silence')
+      const allEvents: { time: number; item: ScriptItem }[] = []
+
+      silences.forEach((sil) => {
+        allEvents.push({
+          time: sil.data.startTime,
+          item: {
+            type: 'silence',
+            data: {
+              ...sil.data,
+              isCut: existingCuts.has(sil.data.id),
+            },
+          },
+        })
+      })
+
+      newPhrases.forEach((phrase) => {
+        allEvents.push({
+          time: phrase.startTime,
+          item: { type: 'phrase', data: phrase },
+        })
+      })
+
+      allEvents.sort((a, b) => a.time - b.time)
+      return allEvents.map((e) => e.item)
+    })
   }
 
   // Update text and keep word-level synchronization aligned
@@ -1846,7 +1938,7 @@ export default function App() {
                     {subtitlePreset === 'hormozi' ? 'Караоке' : subtitlePreset === 'box' ? 'Плашка' : 'Классик'}
                   </span>
                   <span className="font-mono tabular-nums text-[11px] opacity-80">
-                    {subtitleSize}px
+                    {subtitleSize}px · {subtitleDensity === 'fast' ? '2-3 сл.' : subtitleDensity === 'sentence' ? '4-6 сл.' : 'строка'}
                   </span>
                   <ChevronDown className="w-3 h-3 text-zinc-400 shrink-0" />
                 </button>
@@ -1899,6 +1991,36 @@ export default function App() {
                         }`}
                       >
                         {st.title}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Subtitle Density / Chunk Length */}
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <label className="text-[11px] font-medium text-zinc-400">Длина реплики (слов на кадр)</label>
+                    <span className="text-[10px] text-amber-300 font-mono">
+                      {subtitleDensity === 'fast' ? '2–3 слова' : subtitleDensity === 'sentence' ? '4–6 слов (предложение)' : 'Строка'}
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-3 gap-1.5">
+                    {[
+                      { id: 'fast' as const, label: '⚡ 2–3 сл.', title: 'Ультра-динамично (MrBeast / Hormozi)' },
+                      { id: 'sentence' as const, label: '💬 Рилс (4–6)', title: 'По предложениям и знакам препинания' },
+                      { id: 'standard' as const, label: '📄 Строка', title: 'Длинные фразы' },
+                    ].map((d) => (
+                      <button
+                        key={d.id}
+                        onClick={() => handleDensityChange(d.id)}
+                        title={d.title}
+                        className={`py-1.5 px-1.5 rounded-md border text-center transition font-medium text-xs ${
+                          subtitleDensity === d.id
+                            ? 'bg-amber-400 text-zinc-950 border-amber-300 font-bold shadow-sm'
+                            : 'bg-zinc-950/60 text-zinc-400 border-zinc-800 hover:text-zinc-200'
+                        }`}
+                      >
+                        {d.label}
                       </button>
                     ))}
                   </div>
@@ -2061,11 +2183,11 @@ export default function App() {
                 setIsSubtitleMenuOpen(false)
               }}
               disabled={isExporting || isAnalyzing}
-              className="h-8 px-3.5 rounded-lg text-xs font-semibold bg-white hover:bg-zinc-100 text-zinc-950 flex items-center gap-1.5 transition shadow-md shadow-white/5 border border-white/20 active:scale-[0.98] disabled:opacity-50"
+              className="h-8 px-4 rounded-xl text-xs font-bold bg-gradient-to-r from-violet-600 via-indigo-600 to-blue-600 hover:from-violet-500 hover:to-indigo-500 text-white flex items-center gap-2 transition-all shadow-lg shadow-indigo-600/30 ring-1 ring-white/20 active:scale-95 disabled:opacity-50"
             >
               <Download className="w-3.5 h-3.5 stroke-[2.5]" />
               <span>{isExporting ? 'Экспорт...' : 'Экспорт'}</span>
-              <ChevronDown className="w-3.5 h-3.5 text-zinc-700 -mr-0.5" />
+              <ChevronDown className="w-3.5 h-3.5 text-white/80 -mr-0.5" />
             </button>
 
             {/* Export Menu Dropdown */}
@@ -2165,8 +2287,16 @@ export default function App() {
             <div
               className={`relative ${
                 framingMode === 'blur_9_16' ? 'aspect-[9/16] h-full max-h-full' : 'w-full h-full max-h-full'
-              } bg-black/95 rounded-2xl border border-zinc-800/90 ring-1 ring-white/10 shadow-[0_16px_48px_-12px_rgba(0,0,0,0.95)] flex items-center justify-center select-none overflow-hidden`}
+              } bg-black/95 rounded-[24px] border border-white/10 ring-1 ring-white/5 shadow-[0_24px_70px_-15px_rgba(0,0,0,0.95)] flex items-center justify-center select-none overflow-hidden`}
             >
+              
+              {/* 9:16 Format Pill Badge */}
+              {framingMode === 'blur_9_16' && (
+                <div className="absolute top-3 left-3 z-20 pointer-events-none flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-black/60 backdrop-blur-md border border-white/10 text-[10px] font-mono font-medium text-white/80 shadow-md">
+                  <Smartphone className="w-3 h-3 text-indigo-400" />
+                  <span>9:16 REELS</span>
+                </div>
+              )}
               
               {videoSrc ? (
                 <>
@@ -2293,8 +2423,8 @@ export default function App() {
                   >
                     {subtitlePreset === 'hormozi' ? (
                       <div
-                        className="inline-block px-4 py-2 rounded-xl bg-black/85 backdrop-blur-sm border border-black/70 shadow-2xl max-w-[85%] text-balance"
-                        style={{ fontSize: `${Math.max(13, Math.round(subtitleSize * 0.32))}px`, lineHeight: 1.3 }}
+                        className="inline-block px-5 py-2.5 rounded-2xl bg-black/85 backdrop-blur-md border border-white/10 shadow-[0_12px_32px_rgba(0,0,0,0.8)] max-w-[88%] text-balance"
+                        style={{ fontSize: `${Math.max(13, Math.round(subtitleSize * 0.32))}px`, lineHeight: 1.35 }}
                       >
                         {phraseData.words && phraseData.words.length > 0 ? (
                           phraseData.words.map((w, wIdx) => {
@@ -2306,9 +2436,9 @@ export default function App() {
                             return (
                               <span
                                 key={wIdx}
-                                className={`inline-block mx-0.5 px-1 font-black tracking-wide uppercase transition-colors duration-75 ${
+                                className={`inline-block mx-0.5 px-1 font-black tracking-wide uppercase transition-all duration-75 ${
                                   isWordActive
-                                    ? 'text-amber-300 scale-105 drop-shadow-[0_0_12px_rgba(252,211,77,0.9)]'
+                                    ? 'text-amber-300 scale-110 drop-shadow-[0_0_16px_rgba(252,211,77,0.95)] animate-karaoke'
                                     : 'text-white'
                                 }`}
                               >
@@ -2324,18 +2454,18 @@ export default function App() {
                       </div>
                     ) : subtitlePreset === 'box' ? (
                       <div
-                        className="inline-block px-4 py-2 rounded-xl bg-black/80 backdrop-blur-sm text-zinc-100 font-semibold border border-zinc-700/80 shadow-2xl max-w-[85%] text-balance"
-                        style={{ fontSize: `${Math.max(13, Math.round(subtitleSize * 0.32))}px`, lineHeight: 1.3 }}
+                        className="inline-block px-5 py-2.5 rounded-2xl bg-black/80 backdrop-blur-md text-zinc-100 font-bold border border-white/15 shadow-2xl max-w-[88%] text-balance"
+                        style={{ fontSize: `${Math.max(13, Math.round(subtitleSize * 0.32))}px`, lineHeight: 1.35 }}
                       >
                         {phraseData.text}
                       </div>
                     ) : (
                       <div
-                        className="inline-block px-4 py-1.5 text-white font-bold max-w-[85%] text-balance"
+                        className="inline-block px-5 py-2 text-white font-black tracking-wide max-w-[88%] text-balance"
                         style={{
                           fontSize: `${Math.max(13, Math.round(subtitleSize * 0.32))}px`,
-                          lineHeight: 1.3,
-                          textShadow: '0 2px 4px rgba(0,0,0,0.95), 0 0 4px rgba(0,0,0,0.9), 0 0 2px rgba(0,0,0,1)',
+                          lineHeight: 1.35,
+                          textShadow: '0 2px 4px rgba(0,0,0,1), 0 0 10px rgba(0,0,0,0.9), 0 0 2px rgba(0,0,0,1)',
                         }}
                       >
                         {phraseData.text}
@@ -2530,10 +2660,10 @@ export default function App() {
                     <div
                       key={item.data.id}
                       ref={isActive ? activePhraseCardRef : undefined}
-                      className={`group transition-all rounded-xl p-3 border ${
+                      className={`group transition-all rounded-xl p-3.5 border ${
                         isActive
-                          ? 'bg-zinc-900/95 border-amber-400/50 border-l-4 border-l-amber-400 shadow-lg shadow-amber-950/20 ring-1 ring-amber-400/30'
-                          : 'bg-zinc-900/40 border-zinc-800/80 hover:bg-zinc-900/70 hover:border-zinc-700/80'
+                          ? 'bg-gradient-to-r from-amber-500/10 via-zinc-900/95 to-zinc-900/90 border-amber-400/60 border-l-[4px] border-l-amber-400 shadow-xl shadow-amber-950/20 ring-1 ring-amber-400/20'
+                          : 'bg-[#12141d]/70 hover:bg-[#161824]/90 border-white/[0.06] hover:border-white/[0.12]'
                       }`}
                     >
                       {/* Header: Speaker Tag, Timecode Jump, Duration, Active Badge */}
@@ -2543,7 +2673,7 @@ export default function App() {
                         title="Нажмите для перехода к фразе"
                       >
                         <div className="flex items-center gap-2">
-                          <div className="inline-flex items-center gap-1.5 px-2.5 h-6 rounded-full bg-zinc-800/90 border border-zinc-700/60 text-xs font-sans font-medium text-zinc-200 shadow-sm">
+                          <div className="inline-flex items-center gap-1.5 px-2.5 h-6 rounded-full bg-indigo-500/15 border border-indigo-500/30 text-xs font-sans font-medium text-indigo-200 shadow-sm">
                             <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 shrink-0" />
                             <span>{item.data.speaker || 'Спикер'}</span>
                           </div>
@@ -2551,7 +2681,7 @@ export default function App() {
                           <button
                             type="button"
                             onClick={() => seekTo(item.data.startTime)}
-                            className="inline-flex items-center gap-1.5 px-2 h-6 rounded-md bg-zinc-800/50 hover:bg-zinc-800 border border-zinc-700/50 hover:border-zinc-600 text-xs font-mono tabular-nums text-zinc-300 hover:text-white transition shadow-sm"
+                            className="inline-flex items-center gap-1.5 px-2 h-6 rounded-md bg-white/[0.05] hover:bg-white/[0.1] border border-white/[0.08] hover:border-white/[0.15] text-xs font-mono tabular-nums text-zinc-300 hover:text-white transition shadow-sm"
                             title="Перейти к началу фразы"
                           >
                             <Play className="w-2.5 h-2.5 fill-current text-indigo-400 shrink-0" />
@@ -2564,7 +2694,7 @@ export default function App() {
                         </div>
 
                         {isActive && (
-                          <div className="inline-flex items-center gap-1.5 px-2.5 h-6 rounded-full bg-amber-400/10 border border-amber-400/30 text-amber-300 text-xs font-sans font-medium shadow-sm">
+                          <div className="inline-flex items-center gap-1.5 px-2.5 h-6 rounded-full bg-amber-400/15 border border-amber-400/40 text-amber-300 text-xs font-sans font-medium shadow-sm">
                             <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse shrink-0" />
                             <span>В эфире</span>
                           </div>
@@ -2575,9 +2705,36 @@ export default function App() {
                       <AutoResizeTextarea
                         value={item.data.text}
                         onChange={(newText) => handleTextChange(item.data.id, newText)}
-                        className="w-full bg-zinc-950/40 hover:bg-zinc-950/60 focus:bg-zinc-950 px-3 py-2 rounded-lg border border-transparent hover:border-zinc-800/80 focus:border-zinc-700 text-sm md:text-base leading-relaxed text-zinc-100 font-sans resize-none focus:outline-none transition-colors selection:bg-zinc-800 overflow-hidden"
+                        className="w-full bg-black/40 hover:bg-black/60 focus:bg-black/80 px-3 py-2 rounded-lg border border-transparent hover:border-white/[0.08] focus:border-indigo-500/50 text-sm md:text-base leading-relaxed text-zinc-100 font-sans resize-none focus:outline-none transition-colors selection:bg-indigo-500/30 overflow-hidden"
                         placeholder="Введите текст субтитров..."
                       />
+
+                      {/* Clickable Word Strip for Precision Timestamp Scrubbing */}
+                      {item.data.words && item.data.words.length > 0 && (
+                        <div className="flex flex-wrap gap-1 mt-2 pt-2 border-t border-white/[0.04]">
+                          {item.data.words.map((w, wIdx) => {
+                            const isWordPlaying = currentTime >= w.startTime && currentTime <= w.endTime
+                            return (
+                              <button
+                                key={wIdx}
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation()
+                                  seekTo(w.startTime)
+                                }}
+                                className={`px-1.5 py-0.5 rounded text-[11px] font-mono transition ${
+                                  isWordPlaying
+                                    ? 'bg-amber-400 text-zinc-950 font-bold shadow-sm'
+                                    : 'text-zinc-400 hover:text-zinc-100 hover:bg-white/[0.08]'
+                                }`}
+                                title={`Перейти к: ${formatTime(w.startTime)}`}
+                              >
+                                {w.word}
+                              </button>
+                            )
+                          })}
+                        </div>
+                      )}
                     </div>
                   )
                 }
@@ -2838,13 +2995,45 @@ export default function App() {
                           onClick={() => setSubtitlePosition(pos.id)}
                           className={`p-2.5 rounded-lg border text-left transition ${
                             subtitlePosition === pos.id
-                              ? 'bg-zinc-100 text-zinc-950 border-white shadow-sm'
+                              ? 'bg-zinc-100 text-zinc-950 border-white shadow-sm font-semibold'
                               : 'bg-zinc-900/80 text-zinc-400 border-zinc-800 hover:text-zinc-200'
                           }`}
                         >
                           <div className="font-semibold text-xs">{pos.title}</div>
                           <div className={`text-[10px] mt-0.5 ${subtitlePosition === pos.id ? 'text-zinc-700' : 'text-zinc-500'}`}>
                             {pos.desc}
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* 3.4 Density */}
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[11px] text-zinc-400">Длина реплики (слов на кадр)</span>
+                      <span className="font-mono text-xs text-amber-300 font-semibold">
+                        {subtitleDensity === 'fast' ? '2–3 слова' : subtitleDensity === 'sentence' ? '4–6 слов (по смыслу)' : '7–9 слов'}
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-3 gap-2">
+                      {[
+                        { id: 'fast' as const, title: '⚡ Динамика (2–3)', desc: 'Стиль MrBeast / Hormozi' },
+                        { id: 'sentence' as const, title: '💬 Рилс (4–6)', desc: 'По предложениям и паузам' },
+                        { id: 'standard' as const, title: '📄 Строка (7–9)', desc: 'Классические субтитры' },
+                      ].map((d) => (
+                        <button
+                          key={d.id}
+                          onClick={() => handleDensityChange(d.id)}
+                          className={`p-2.5 rounded-lg border text-left transition ${
+                            subtitleDensity === d.id
+                              ? 'bg-amber-400 text-zinc-950 border-amber-300 shadow-sm'
+                              : 'bg-zinc-900/80 text-zinc-400 border-zinc-800 hover:text-zinc-200'
+                          }`}
+                        >
+                          <div className="font-semibold text-xs">{d.title}</div>
+                          <div className={`text-[10px] mt-0.5 ${subtitleDensity === d.id ? 'text-zinc-900 font-bold' : 'text-zinc-500'}`}>
+                            {d.desc}
                           </div>
                         </button>
                       ))}
@@ -3612,15 +3801,26 @@ export default function App() {
           onClick={handleTimelineClick}
           className="relative flex-1 bg-zinc-950 cursor-pointer overflow-hidden flex items-center"
         >
-          {/* Waveform Bars */}
-          <div className="absolute inset-0 flex items-center justify-between px-2 pointer-events-none">
-            {waveform.map((peak, idx) => (
-              <div
-                key={idx}
-                className="w-[2px] bg-zinc-400/80 rounded-full"
-                style={{ height: `${Math.max(8, peak * 0.7)}%` }}
-              />
-            ))}
+          {/* Modern Audio Waveform with dynamic height and sleek gradient */}
+          <div className="absolute inset-0 flex items-center justify-between px-3 pointer-events-none gap-[2px]">
+            {waveform.map((peak, idx) => {
+              const barHeightPct = Math.max(12, Math.min(92, peak * 0.85))
+              const barTime = totalDuration > 0 ? (idx / waveform.length) * totalDuration : 0
+              const isPast = barTime <= currentTime
+              return (
+                <div
+                  key={idx}
+                  className="flex-1 max-w-[4px] min-w-[2px] rounded-full transition-all duration-75"
+                  style={{
+                    height: `${barHeightPct}%`,
+                    background: isPast
+                      ? 'linear-gradient(to top, rgba(99, 102, 241, 0.9), rgba(168, 85, 247, 0.95))'
+                      : 'linear-gradient(to top, rgba(255, 255, 255, 0.18), rgba(255, 255, 255, 0.45))',
+                    boxShadow: isPast ? '0 0 8px rgba(129, 140, 248, 0.3)' : 'none',
+                  }}
+                />
+              )
+            })}
           </div>
 
           {/* Silence Overlay Zones with pattern */}
@@ -3657,28 +3857,37 @@ export default function App() {
             )
           })}
 
-          {/* Precision 1px Red Playhead Needle */}
+          {/* Precision Playhead Needle with glowing diamond and ambient vertical beam */}
           <div
-            className="absolute top-0 bottom-0 w-px bg-red-500 z-30 pointer-events-none"
+            className="absolute top-0 bottom-0 w-[2px] bg-gradient-to-b from-rose-500 via-pink-500 to-indigo-500 z-30 pointer-events-none shadow-[0_0_12px_rgba(244,63,94,0.8)]"
             style={{ left: `${totalDuration > 0 ? (currentTime / totalDuration) * 100 : 0}%` }}
           >
-            <div className="w-2.5 h-2.5 bg-red-500 rotate-45 -ml-[4px] -top-1 absolute shadow-sm" />
+            <div className="w-3 h-3 bg-gradient-to-br from-rose-400 to-pink-600 rotate-45 -ml-[5px] -top-1.5 absolute shadow-md ring-1 ring-white/50" />
           </div>
         </div>
 
         {/* Timeline Bottom Legend */}
-        <div className="h-6 px-4 bg-zinc-900/95 border-t border-zinc-800/60 flex items-center justify-between text-xs font-sans text-zinc-400">
+        <div className="h-6 px-4 bg-zinc-950/90 border-t border-white/[0.06] flex items-center justify-between text-xs font-sans text-zinc-400">
           <div className="flex items-center gap-3">
-            <span>Пробел — воспроизведение/пауза</span>
-            <span className="text-zinc-600">•</span>
-            <span className="text-zinc-300">← / → — переход на 2 с</span>
+            <span className="flex items-center gap-1.5">
+              <kbd className="px-1.5 py-0.5 rounded bg-white/[0.08] border border-white/[0.1] font-mono text-[10px] text-zinc-300">Пробел</kbd>
+              <span>Старт / Пауза</span>
+            </span>
+            <span className="text-zinc-700">•</span>
+            <span className="flex items-center gap-1.5">
+              <kbd className="px-1.5 py-0.5 rounded bg-white/[0.08] border border-white/[0.1] font-mono text-[10px] text-zinc-300">← / →</kbd>
+              <span>±2 сек</span>
+            </span>
           </div>
-          <div className="flex items-center gap-2">
-            <span>Паузы: {pauseMode === 'smart' ? 'по речи' : `по громкости (${silenceThreshold} dB)`}</span>
-            <span className="text-zinc-600">•</span>
-            <span>Мин. пауза: <span className="font-mono tabular-nums">{minSilenceDuration} с</span></span>
-            <span className="text-zinc-600">•</span>
-            <span className="text-emerald-400 font-medium font-mono">GPU: NVENC</span>
+          <div className="flex items-center gap-2.5">
+            <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-white/[0.05] border border-white/[0.08] text-[11px]">
+              <span className="w-1.5 h-1.5 rounded-full bg-indigo-400" />
+              <span>Паузы: {pauseMode === 'smart' ? 'AI Voice VAD' : `dB (${silenceThreshold} dB)`}</span>
+            </span>
+            <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-[11px] text-emerald-300 font-mono">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+              <span>NVENC Hardware</span>
+            </span>
           </div>
         </div>
 
